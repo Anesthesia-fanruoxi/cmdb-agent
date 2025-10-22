@@ -1,0 +1,35 @@
+# CMDB代理配置文件
+
+# 服务器配置
+server:
+  port: 8081
+  host: "0.0.0.0"
+  read_timeout: 30
+  write_timeout: 30
+
+# CMDB平台配置
+cmdb:
+  url: "http://192.168.100.128:8080"
+  register_path: "/api/agent/node/register"
+  heartbeat_path: "/api/agent/node/heartbeat"
+  plugins_path: "/api/agent/plugins"
+  timeout: 3
+  heartbeat_interval: 30  # 心跳间隔(秒)
+
+# 代理配置
+agent:
+  project: "test"
+  url: "http://192.168.7.2:8081"
+
+# 日志配置
+log:
+  level: "info"  # debug, info, warn, error, fatal
+  file_path: "./logs/cmdb-agent.log"
+  max_size: 100      # MB
+  max_backups: 10
+  max_age: 30        # 天
+  compress: true
+
+# 安全配置
+security:
+  agent_salt: "usTIOicgOwnqTwCvwsFqQhtIpqtBwZAO"  # 32字节加解密密钥
