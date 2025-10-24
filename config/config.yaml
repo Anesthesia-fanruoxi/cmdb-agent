@@ -15,6 +15,10 @@ cmdb:
   plugins_path: "/api/agent/plugins"
   timeout: 3
   heartbeat_interval: 30  # 心跳间隔(秒)
+  enable_auto_update: true              # 是否启用自动更新
+  auto_update_interval: 1               # 更新检查间隔（分钟）
+  plugin_versions_path: "/api/agent/plugins/versions"  # 版本查询接口路径
+
 
 # 代理配置
 agent:

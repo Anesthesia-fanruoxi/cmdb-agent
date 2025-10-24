@@ -27,11 +27,14 @@ type ServerConfig struct {
 
 // CMDBConfig CMDB平台配置
 type CMDBConfig struct {
-	URL               string `mapstructure:"url"`
-	RegisterPath      string `mapstructure:"register_path"`
-	HeartbeatPath     string `mapstructure:"heartbeat_path"`
-	Timeout           int    `mapstructure:"timeout"`
-	HeartbeatInterval int    `mapstructure:"heartbeat_interval"`
+	URL                string `mapstructure:"url"`
+	RegisterPath       string `mapstructure:"register_path"`
+	HeartbeatPath      string `mapstructure:"heartbeat_path"`
+	Timeout            int    `mapstructure:"timeout"`
+	HeartbeatInterval  int    `mapstructure:"heartbeat_interval"`
+	EnableAutoUpdate   bool   `mapstructure:"enable_auto_update"`
+	AutoUpdateInterval int    `mapstructure:"auto_update_interval"` // 分钟
+	PluginVersionsPath string `mapstructure:"plugin_versions_path"`
 }
 
 // AgentConfig 代理配置
@@ -112,6 +115,9 @@ func setDefaults() {
 	viper.SetDefault("cmdb.heartbeat_path", "/api/agent/heartbeat")
 	viper.SetDefault("cmdb.timeout", 10)
 	viper.SetDefault("cmdb.heartbeat_interval", 30)
+	viper.SetDefault("cmdb.enable_auto_update", true)
+	viper.SetDefault("cmdb.auto_update_interval", 1)
+	viper.SetDefault("cmdb.plugin_versions_path", "/agent/plugins/versions")
 
 	// 代理默认配置
 	hostname, _ := os.Hostname()
