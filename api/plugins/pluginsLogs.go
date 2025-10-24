@@ -109,9 +109,6 @@ func streamContainerLogs(conn *websocket.Conn, containerID, tail, follow string)
 		args = append(args, "-f")
 	}
 
-	// 添加时间戳
-	args = append(args, "--timestamps")
-
 	// 添加容器ID
 	args = append(args, containerID)
 

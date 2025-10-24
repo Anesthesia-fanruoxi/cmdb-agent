@@ -142,7 +142,8 @@ func AddPluginRecord(record *PluginRecord) error {
 	// 检查是否已存在
 	for i, p := range registry.Plugins {
 		if p.Name == record.Name {
-			// 更新已存在的记录
+			// 更新已存在的记录，每次更新都更新时间
+			record.InstalledAt = time.Now()
 			record.UpdatedAt = time.Now()
 			registry.Plugins[i] = record
 			common.Info("更新插件记录", zap.String("name", record.Name))

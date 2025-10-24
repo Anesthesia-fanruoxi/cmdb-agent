@@ -17,17 +17,23 @@ func SetupRouter() *http.ServeMux {
 	// 插件列表接口
 	mux.HandleFunc("/api/plugins/list", plugins.PluginsListHandler)
 
+	// 插件详情接口
+	mux.HandleFunc("/api/plugins/detail", plugins.PluginDetailHandler)
+
 	// 插件操作接口（启动/停止/重启）
 	mux.HandleFunc("/api/plugins/operate", plugins.PluginOperatorHandler)
 
-	// 插件更新接口
+	// 插件更新接口（支持版本升级和配置更新）
 	mux.HandleFunc("/api/plugins/update", plugins.PluginUpdateHandler)
 
 	// 插件卸载接口
 	mux.HandleFunc("/api/plugins/uninstall", plugins.PluginUninstallHandler)
 
 	// 插件日志查看接口（WebSocket）
-	mux.HandleFunc("/api/plugins/logs", plugins.PluginLogsHandler)
+	mux.HandleFunc("/ws/plugins/logs", plugins.PluginLogsHandler)
+
+	// 插件任务日志查看接口（WebSocket）- 用于读取cicd任务日志
+	mux.HandleFunc("/ws/cicd/logs", plugins.PluginCustomLogHandler)
 
 	// 健康检查接口
 	mux.HandleFunc("/health", healthHandler)

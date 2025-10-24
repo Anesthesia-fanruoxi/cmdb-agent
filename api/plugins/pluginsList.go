@@ -21,8 +21,68 @@ type PluginInfo struct {
 	Port          int                    `json:"port"`
 	ContainerPort int                    `json:"container_port,omitempty"`
 	Uptime        string                 `json:"uptime,omitempty"`
-	Config        map[string]interface{} `json:"config,omitempty"` // 敏感字段已脱敏
+	Config        map[string]interface{} `json:"config,omitempty"`
 	InstalledAt   time.Time              `json:"installed_at"`
+}
+
+// PluginDetailHandler 查询单一插件详情
+func PluginDetailHandler(w http.ResponseWriter, r *http.Request) {
+	common.Info("收到查询插件详情请求",
+		zap.String("method", r.Method),
+		zap.String("path", r.URL.Path))
+
+	// 只允许GET请求
+	if r.Method != http.MethodGet {
+		common.RespondMethodNotAllowed(w, "只允许GET请求")
+		return
+	}
+
+	// 获取插件名称参数
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		common.RespondError(w, http.StatusBadRequest, "缺少插件名称参数")
+		return
+	}
+
+	// 查询插件记录
+	record, err := GetPluginRecord(name)
+	if err != nil {
+		common.Error("查询插件记录失败", zap.Error(err))
+		common.RespondError(w, http.StatusInternalServerError,
+			"查询插件记录失败: "+err.Error())
+		return
+	}
+
+	if record == nil {
+		common.RespondError(w, http.StatusNotFound,
+			fmt.Sprintf("插件不存在: %s", name))
+		return
+	}
+
+	// 构建插件信息
+	info := &PluginInfo{
+		Name:          record.Name,
+		Version:       record.Version,
+		Category:      record.Category,
+		Port:          record.Port,
+		ContainerPort: record.ContainerPort,
+		Config:        record.Config,
+		InstalledAt:   record.InstalledAt,
+	}
+
+	// 根据类型查询状态
+	if record.Category == "container" {
+		info.Status, info.Uptime = getContainerStatus(record.ContainerID)
+	} else if record.Category == "binary" {
+		info.Status, info.Uptime = getBinaryStatusFromSystemd(record.Name)
+	}
+
+	// 返回结果
+	common.Info("查询插件详情成功",
+		zap.String("name", name),
+		zap.String("status", info.Status))
+
+	common.RespondSuccess(w, info)
 }
 
 // PluginsListHandler 查询插件列表
@@ -71,7 +131,7 @@ func PluginsListHandler(w http.ResponseWriter, r *http.Request) {
 			Category:      record.Category,
 			Port:          record.Port,
 			ContainerPort: record.ContainerPort,
-			Config:        maskSensitiveConfig(record.Config), // 脱敏处理
+			Config:        record.Config,
 			InstalledAt:   record.InstalledAt,
 		}
 
@@ -79,7 +139,7 @@ func PluginsListHandler(w http.ResponseWriter, r *http.Request) {
 		if record.Category == "container" {
 			info.Status, info.Uptime = getContainerStatus(record.ContainerID)
 		} else if record.Category == "binary" {
-			info.Status = getBinaryStatusFromSystemd(record.Name)
+			info.Status, info.Uptime = getBinaryStatusFromSystemd(record.Name)
 		}
 
 		// 过滤：状态
@@ -158,12 +218,71 @@ func getContainerStatus(containerID string) (string, string) {
 	}
 }
 
-// getBinaryStatusFromSystemd 从systemd查询二进制插件状态
-func getBinaryStatusFromSystemd(pluginName string) string {
-	if common.SystemctlIsActive(pluginName) {
-		return "running"
+// getBinaryStatusFromSystemd 从systemd查询二进制插件状态和运行时间
+func getBinaryStatusFromSystemd(pluginName string) (string, string) {
+	if !common.SystemctlIsActive(pluginName) {
+		return "stopped", ""
 	}
-	return "stopped"
+
+	// 服务运行中，获取启动时间
+	uptime := getServiceUptime(pluginName)
+	return "running", uptime
+}
+
+// getServiceUptime 获取systemd服务的运行时间
+func getServiceUptime(pluginName string) string {
+	serviceName := common.GetServiceName(pluginName)
+
+	// 使用systemctl show获取服务属性
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "systemctl", "show", serviceName, "--property=ActiveEnterTimestamp")
+	output, err := cmd.Output()
+	if err != nil {
+		common.Debug("获取服务启动时间失败",
+			zap.String("service", serviceName),
+			zap.Error(err))
+		return ""
+	}
+
+	// 解析输出：ActiveEnterTimestamp=Thu 2025-10-24 14:00:55 CST
+	line := strings.TrimSpace(string(output))
+	if !strings.HasPrefix(line, "ActiveEnterTimestamp=") {
+		return ""
+	}
+
+	timestampStr := strings.TrimPrefix(line, "ActiveEnterTimestamp=")
+	if timestampStr == "" || timestampStr == "n/a" {
+		return ""
+	}
+
+	// 解析时间格式：Thu 2025-10-24 14:00:55 CST
+	// systemd使用的是RFC1123Z类似格式
+	layouts := []string{
+		"Mon 2006-01-02 15:04:05 MST",
+		time.RFC1123Z,
+		time.RFC1123,
+	}
+
+	var startTime time.Time
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, timestampStr); err == nil {
+			startTime = t
+			break
+		}
+	}
+
+	if startTime.IsZero() {
+		common.Debug("解析服务启动时间失败",
+			zap.String("service", serviceName),
+			zap.String("timestamp", timestampStr))
+		return ""
+	}
+
+	// 计算运行时间
+	duration := time.Since(startTime)
+	return formatDuration(duration)
 }
 
 // getBinaryStatus 查询二进制进程状态（已废弃，保留用于兼容）
@@ -198,48 +317,4 @@ func formatDuration(d time.Duration) string {
 	} else {
 		return fmt.Sprintf("%dd%dh", int(d.Hours())/24, int(d.Hours())%24)
 	}
-}
-
-// maskSensitiveConfig 对配置中的敏感字段进行脱敏
-func maskSensitiveConfig(config map[string]interface{}) map[string]interface{} {
-	if config == nil {
-		return nil
-	}
-
-	// 敏感字段关键词列表（不区分大小写）
-	sensitiveKeywords := []string{
-		"password", "passwd", "pwd",
-		"secret", "token", "key",
-		"credential", "auth",
-		"apikey", "api_key",
-		"access_key", "secret_key",
-	}
-
-	masked := make(map[string]interface{})
-	for key, value := range config {
-		keyLower := strings.ToLower(key)
-		isSensitive := false
-
-		// 检查是否包含敏感关键词
-		for _, keyword := range sensitiveKeywords {
-			if strings.Contains(keyLower, keyword) {
-				isSensitive = true
-				break
-			}
-		}
-
-		if isSensitive {
-			// 脱敏处理：统一使用6个星号
-			masked[key] = "******"
-		} else {
-			// 非敏感字段，检查是否为嵌套map
-			if mapValue, ok := value.(map[string]interface{}); ok {
-				masked[key] = maskSensitiveConfig(mapValue)
-			} else {
-				masked[key] = value
-			}
-		}
-	}
-
-	return masked
 }

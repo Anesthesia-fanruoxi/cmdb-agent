@@ -8,8 +8,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -35,7 +33,6 @@ type InstallRequest struct {
 	Command     string                 `json:"command"`      // 执行命令
 	Port        int                    `json:"port"`         // 端口
 	Config      map[string]interface{} `json:"config"`       // 环境变量/配置参数
-	ConfigFile  string                 `json:"config_file"`  // 配置文件完整内容（YAML格式）
 	Parameters  Parameters             `json:"parameters"`   // 类型特定参数
 }
 
@@ -230,17 +227,7 @@ func installBinaryPlugin(req InstallRequest) (map[string]interface{}, error) {
 	common.Info("二进制文件下载成功",
 		zap.String("path", binaryPath))
 
-	// 步骤2: 如果有配置文件内容，生成config.yaml
-	if req.ConfigFile != "" {
-		if err := createConfigFile(req.Name, binaryPath, req.ConfigFile); err != nil {
-			common.Warn("创建配置文件失败，继续安装",
-				zap.String("name", req.Name),
-				zap.Error(err))
-			// 不返回错误，继续安装
-		}
-	}
-
-	// 步骤3: 启动二进制服务（使用systemd）
+	// 步骤2: 启动二进制服务（使用systemd）
 	if err := startBinaryService(req.Name, binaryPath, req.Port, req.Command, req.Config, req.Parameters); err != nil {
 		return nil, err
 	}
@@ -432,35 +419,4 @@ func extractPortFromCommand(command string) int {
 	}
 
 	return 0
-}
-
-// createConfigFile 创建插件配置文件
-func createConfigFile(pluginName, binaryPath, configContent string) error {
-	// 获取插件目录
-	pluginDir := filepath.Dir(binaryPath)
-
-	// 创建config子目录
-	configDir := filepath.Join(pluginDir, "config")
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		return fmt.Errorf("创建config目录失败: %v", err)
-	}
-
-	common.Info("创建config目录",
-		zap.String("plugin", pluginName),
-		zap.String("dir", configDir))
-
-	// 配置文件路径
-	configFilePath := filepath.Join(configDir, "config.yaml")
-
-	// 写入配置文件
-	if err := os.WriteFile(configFilePath, []byte(configContent), 0644); err != nil {
-		return fmt.Errorf("写入配置文件失败: %v", err)
-	}
-
-	common.Info("配置文件创建成功",
-		zap.String("plugin", pluginName),
-		zap.String("file", configFilePath),
-		zap.Int("size", len(configContent)))
-
-	return nil
 }

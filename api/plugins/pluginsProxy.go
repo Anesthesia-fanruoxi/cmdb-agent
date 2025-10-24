@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"go.uber.org/zap"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -19,10 +20,16 @@ import (
 func PluginProxyHandler(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 
+	// 提取远程IP（去掉端口）
+	remoteIP := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		remoteIP = host
+	}
+
 	common.Info("收到代理请求",
 		zap.String("method", r.Method),
 		zap.String("path", r.URL.Path),
-		zap.String("remote", r.RemoteAddr))
+		zap.String("remote", remoteIP))
 
 	// 解析路径: /proxy/{plugin-name}/{real-path}
 	path := strings.TrimPrefix(r.URL.Path, "/proxy/")
@@ -145,12 +152,16 @@ func PluginProxyHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 设置X-Forwarded-For
-	if clientIP := r.RemoteAddr; clientIP != "" {
+	// 设置X-Forwarded-For 和 X-Real-IP（只传IP，不带端口）
+	if clientIP, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		proxyReq.Header.Set("X-Forwarded-For", clientIP)
+		proxyReq.Header.Set("X-Real-IP", clientIP)
+	} else {
+		// 如果解析失败，直接使用原始值
+		proxyReq.Header.Set("X-Forwarded-For", r.RemoteAddr)
+		proxyReq.Header.Set("X-Real-IP", r.RemoteAddr)
 	}
 	proxyReq.Header.Set("X-Forwarded-Host", r.Host)
-	proxyReq.Header.Set("X-Real-IP", r.RemoteAddr)
 
 	// 发送请求
 	client := &http.Client{
@@ -177,7 +188,7 @@ func PluginProxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 加密响应体
+	// 加密整个响应体
 	cfg := config.GetConfig()
 	encryptedData, err := common.CompressAndEncrypt(plainResponseBody, cfg.Security.AgentSalt)
 	if err != nil {

@@ -7,6 +7,8 @@ import (
 	"go.uber.org/zap"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 )
 
 // UpdateRequest 插件更新请求
@@ -99,45 +101,50 @@ func PluginUpdateHandler(w http.ResponseWriter, r *http.Request) {
 
 // updateContainerPlugin 更新容器类型插件
 func updateContainerPlugin(oldRecord *PluginRecord, req UpdateRequest) (map[string]interface{}, error) {
-	common.Info("开始更新容器插件",
+	// 判断是版本升级还是仅配置更新
+	isVersionUpgrade := req.Version != "" && req.Version != oldRecord.Version
+
+	if isVersionUpgrade {
+		common.Info("执行版本升级",
+			zap.String("name", req.Name),
+			zap.String("old_version", oldRecord.Version),
+			zap.String("new_version", req.Version))
+		return upgradeContainerVersion(oldRecord, req)
+	} else {
+		common.Info("执行配置更新",
+			zap.String("name", req.Name),
+			zap.String("version", oldRecord.Version))
+		return updateContainerConfigOnly(oldRecord, req)
+	}
+}
+
+// upgradeContainerVersion 升级容器版本（拉取新镜像并重建）
+func upgradeContainerVersion(oldRecord *PluginRecord, req UpdateRequest) (map[string]interface{}, error) {
+	common.Info("开始升级容器插件版本",
 		zap.String("name", req.Name),
 		zap.String("old_version", oldRecord.Version),
 		zap.String("new_version", req.Version))
 
-	// 合并配置（新配置覆盖旧配置）
-	newConfig := make(map[string]interface{})
-	for k, v := range oldRecord.Config {
-		newConfig[k] = v
-	}
-	for k, v := range req.Config {
-		newConfig[k] = v
-	}
-
-	// 确定新版本和镜像
-	newVersion := req.Version
-	if newVersion == "" {
-		newVersion = oldRecord.Version // 保持原版本
+	// 直接使用新配置（CMDB发送的是最终完整配置）
+	newConfig := req.Config
+	if newConfig == nil {
+		newConfig = make(map[string]interface{})
 	}
 
 	// 构建新镜像地址（替换tag）
-	newImage := oldRecord.Image
-	if newVersion != "" && newVersion != oldRecord.Version {
-		// 解析镜像名称，替换tag
-		// 例如: hub.hzbxhd.com/test/sql-plugs:2.0 -> hub.hzbxhd.com/test/sql-plugs:3.0
-		imageWithoutTag := oldRecord.Image
-		if lastColon := len(oldRecord.Image) - 1; lastColon > 0 {
-			for i := len(oldRecord.Image) - 1; i >= 0; i-- {
-				if oldRecord.Image[i] == ':' {
-					imageWithoutTag = oldRecord.Image[:i]
-					break
-				}
+	imageWithoutTag := oldRecord.Image
+	if lastColon := len(oldRecord.Image) - 1; lastColon > 0 {
+		for i := len(oldRecord.Image) - 1; i >= 0; i-- {
+			if oldRecord.Image[i] == ':' {
+				imageWithoutTag = oldRecord.Image[:i]
+				break
 			}
 		}
-		newImage = fmt.Sprintf("%s:%s", imageWithoutTag, newVersion)
-		common.Info("镜像版本更新",
-			zap.String("old_image", oldRecord.Image),
-			zap.String("new_image", newImage))
 	}
+	newImage := fmt.Sprintf("%s:%s", imageWithoutTag, req.Version)
+	common.Info("镜像版本更新",
+		zap.String("old_image", oldRecord.Image),
+		zap.String("new_image", newImage))
 
 	// 确定新端口
 	newPort := req.Port
@@ -151,18 +158,14 @@ func updateContainerPlugin(oldRecord *PluginRecord, req UpdateRequest) (map[stri
 		newParams.ContainerPort = req.Parameters.ContainerPort
 	}
 
-	common.Info("更新策略: 拉取镜像 -> 停止 -> 删除 -> 重建")
+	common.Info("升级策略: 拉取镜像 -> 停止 -> 删除 -> 重建")
 
-	// 步骤1: 先拉取新镜像（如果版本变化）
-	if newImage != oldRecord.Image {
-		common.Info("步骤1: 拉取新镜像", zap.String("image", newImage))
-		if err := pullDockerImage(newImage); err != nil {
-			return nil, fmt.Errorf("拉取新镜像失败，取消更新: %v", err)
-		}
-		common.Info("新镜像拉取成功，开始更新容器")
-	} else {
-		common.Info("步骤1: 版本未变化，跳过拉取镜像")
+	// 步骤1: 先拉取新镜像
+	common.Info("步骤1: 拉取新镜像", zap.String("image", newImage))
+	if err := pullDockerImage(newImage); err != nil {
+		return nil, fmt.Errorf("拉取新镜像失败，取消升级: %v", err)
 	}
+	common.Info("新镜像拉取成功，开始升级容器")
 
 	// 步骤2: 停止旧容器
 	common.Info("步骤2: 停止旧容器")
@@ -190,7 +193,7 @@ func updateContainerPlugin(oldRecord *PluginRecord, req UpdateRequest) (map[stri
 	common.Info("步骤5: 更新注册表记录")
 	newRecord := &PluginRecord{
 		Name:          req.Name,
-		Version:       newVersion,
+		Version:       req.Version,
 		Category:      "container",
 		Image:         newImage,
 		ContainerID:   containerID,
@@ -207,36 +210,131 @@ func updateContainerPlugin(oldRecord *PluginRecord, req UpdateRequest) (map[stri
 	return map[string]interface{}{
 		"name":         req.Name,
 		"old_version":  oldRecord.Version,
-		"new_version":  newVersion,
+		"new_version":  req.Version,
 		"old_image":    oldRecord.Image,
 		"new_image":    newImage,
 		"container_id": containerID,
 		"port":         newPort,
 		"status":       "running",
-		"message":      "插件更新成功",
+		"message":      "插件版本升级成功",
+	}, nil
+}
+
+// updateContainerConfigOnly 仅更新容器配置（不升级版本）
+func updateContainerConfigOnly(oldRecord *PluginRecord, req UpdateRequest) (map[string]interface{}, error) {
+	common.Info("开始更新容器配置",
+		zap.String("name", req.Name),
+		zap.Any("old_config", maskSensitiveConfigForLog(oldRecord.Config)),
+		zap.Any("new_config", maskSensitiveConfigForLog(req.Config)))
+
+	// 直接使用新配置替换旧配置（完全替换，不保留旧配置中的键）
+	newConfig := req.Config
+	if newConfig == nil {
+		newConfig = make(map[string]interface{})
+	}
+
+	// 保存旧容器ID用于回滚
+	oldContainerID := oldRecord.ContainerID
+
+	common.Info("更新策略: 停止 -> 删除 -> 重建（仅配置变化）")
+
+	// 步骤1: 停止旧容器
+	common.Info("步骤1: 停止旧容器")
+	if _, err := operateContainer(oldRecord, "stop"); err != nil {
+		common.Warn("停止旧容器失败，继续执行", zap.Error(err))
+	}
+
+	// 步骤2: 删除旧容器
+	common.Info("步骤2: 删除旧容器")
+	if err := uninstallContainer(oldRecord); err != nil {
+		common.Warn("删除旧容器失败，继续执行", zap.Error(err))
+	}
+
+	// 步骤3: 使用新配置重新创建容器（使用原镜像）
+	common.Info("步骤3: 使用新配置重新创建容器",
+		zap.String("image", oldRecord.Image),
+		zap.Int("port", oldRecord.Port))
+
+	containerID, err := startContainerService(
+		req.Name,
+		oldRecord.Image,
+		oldRecord.Port,
+		"",
+		newConfig,
+		oldRecord.Parameters,
+	)
+	if err != nil {
+		common.Error("创建新容器失败", zap.Error(err))
+		// 回滚：尝试用旧配置重新创建容器
+		if rollbackID, rollbackErr := startContainerService(
+			req.Name,
+			oldRecord.Image,
+			oldRecord.Port,
+			"",
+			oldRecord.Config,
+			oldRecord.Parameters,
+		); rollbackErr == nil {
+			oldRecord.ContainerID = rollbackID
+			AddPluginRecord(oldRecord)
+			common.Info("已回滚到旧配置")
+		}
+		return nil, fmt.Errorf("创建新容器失败: %v", err)
+	}
+
+	// 步骤4: 更新注册表记录
+	common.Info("步骤4: 更新注册表记录")
+	oldRecord.Config = newConfig
+	oldRecord.ContainerID = containerID
+	if err := AddPluginRecord(oldRecord); err != nil {
+		common.Warn("更新插件记录失败", zap.Error(err))
+	}
+
+	common.Info("容器配置更新完成",
+		zap.String("name", req.Name),
+		zap.String("old_container_id", oldContainerID[:12]),
+		zap.String("new_container_id", containerID[:12]))
+
+	return map[string]interface{}{
+		"name":         req.Name,
+		"version":      oldRecord.Version,
+		"category":     "container",
+		"container_id": containerID,
+		"config":       maskSensitiveConfigForLog(newConfig),
+		"status":       "running",
+		"message":      "配置更新成功，容器已重启",
 	}, nil
 }
 
 // updateBinaryPlugin 更新二进制类型插件
 func updateBinaryPlugin(oldRecord *PluginRecord, req UpdateRequest) (map[string]interface{}, error) {
-	common.Info("开始更新二进制插件",
+	// 判断是版本升级还是仅配置更新
+	isVersionUpgrade := req.Version != "" && req.Version != oldRecord.Version
+
+	if isVersionUpgrade {
+		common.Info("执行版本升级",
+			zap.String("name", req.Name),
+			zap.String("old_version", oldRecord.Version),
+			zap.String("new_version", req.Version))
+		return upgradeBinaryVersion(oldRecord, req)
+	} else {
+		common.Info("执行配置更新",
+			zap.String("name", req.Name),
+			zap.String("version", oldRecord.Version))
+		return updateBinaryConfigOnly(oldRecord, req)
+	}
+}
+
+// upgradeBinaryVersion 升级二进制版本（下载新版本文件）
+func upgradeBinaryVersion(oldRecord *PluginRecord, req UpdateRequest) (map[string]interface{}, error) {
+	common.Info("开始升级二进制插件版本",
 		zap.String("name", req.Name),
 		zap.String("old_version", oldRecord.Version),
 		zap.String("new_version", req.Version))
 
-	// 合并配置
-	newConfig := make(map[string]interface{})
-	for k, v := range oldRecord.Config {
-		newConfig[k] = v
-	}
-	for k, v := range req.Config {
-		newConfig[k] = v
-	}
-
-	// 确定新版本
-	newVersion := req.Version
-	if newVersion == "" {
-		newVersion = oldRecord.Version
+	// 直接使用新配置（CMDB发送的是最终完整配置）
+	newConfig := req.Config
+	if newConfig == nil {
+		newConfig = make(map[string]interface{})
 	}
 
 	// 确定新端口
@@ -254,7 +352,7 @@ func updateBinaryPlugin(oldRecord *PluginRecord, req UpdateRequest) (map[string]
 		newParams.ConfigFile = req.Parameters.ConfigFile
 	}
 
-	common.Info("更新策略: 停止 -> 删除 -> 下载 -> 启动")
+	common.Info("升级策略: 停止 -> 备份 -> 下载 -> 启动")
 
 	// 步骤1: 停止旧进程
 	common.Info("步骤1: 停止旧进程")
@@ -262,37 +360,45 @@ func updateBinaryPlugin(oldRecord *PluginRecord, req UpdateRequest) (map[string]
 		common.Warn("停止旧进程失败，继续执行", zap.Error(err))
 	}
 
-	// 步骤2: 如果版本变化，重新下载
-	newBinaryPath := oldRecord.BinaryPath
-	if newVersion != oldRecord.Version && oldRecord.DownloadURL != "" {
-		common.Info("步骤2: 下载新版本二进制文件")
-
-		// 删除旧文件
-		if err := uninstallBinary(oldRecord); err != nil {
-			common.Warn("删除旧文件失败", zap.Error(err))
-		}
-
-		// 下载新版本
-		var err error
-		newBinaryPath, err = downloadBinary(req.Name, oldRecord.DownloadURL)
-		if err != nil {
-			return nil, fmt.Errorf("下载新版本失败: %v", err)
-		}
+	// 步骤2: 备份旧二进制文件
+	common.Info("步骤2: 备份旧二进制文件")
+	backupPath := oldRecord.BinaryPath + ".backup"
+	if err := os.Rename(oldRecord.BinaryPath, backupPath); err != nil {
+		common.Warn("备份旧文件失败",
+			zap.String("path", oldRecord.BinaryPath),
+			zap.Error(err))
 	} else {
-		common.Info("步骤2: 版本未变化，使用原二进制文件")
+		common.Info("旧文件已备份",
+			zap.String("backup", backupPath))
 	}
 
-	// 步骤3: 启动新服务（使用systemd）
-	common.Info("步骤3: 启动新服务(systemd)")
+	// 步骤3: 下载新版本
+	common.Info("步骤3: 下载新版本二进制文件")
+	newBinaryPath, err := downloadBinary(req.Name, oldRecord.DownloadURL)
+	if err != nil {
+		// 下载失败，恢复备份
+		if _, restoreErr := os.Stat(backupPath); restoreErr == nil {
+			os.Rename(backupPath, oldRecord.BinaryPath)
+			common.Info("下载失败，已恢复备份")
+		}
+		return nil, fmt.Errorf("下载新版本失败: %v", err)
+	}
+
+	// 下载成功，删除备份
+	os.Remove(backupPath)
+	common.Info("新版本下载成功，备份已删除")
+
+	// 步骤4: 启动新服务（使用systemd）
+	common.Info("步骤4: 启动新服务(systemd)")
 	if err := startBinaryService(req.Name, newBinaryPath, newPort, "", newConfig, newParams); err != nil {
 		return nil, fmt.Errorf("启动新服务失败: %v", err)
 	}
 
-	// 步骤4: 更新注册表记录
-	common.Info("步骤4: 更新注册表记录")
+	// 步骤5: 更新注册表记录
+	common.Info("步骤5: 更新注册表记录")
 	newRecord := &PluginRecord{
 		Name:        req.Name,
-		Version:     newVersion,
+		Version:     req.Version,
 		Category:    "binary",
 		DownloadURL: oldRecord.DownloadURL,
 		BinaryPath:  newBinaryPath,
@@ -308,11 +414,70 @@ func updateBinaryPlugin(oldRecord *PluginRecord, req UpdateRequest) (map[string]
 	return map[string]interface{}{
 		"name":        req.Name,
 		"old_version": oldRecord.Version,
-		"new_version": newVersion,
+		"new_version": req.Version,
 		"binary_path": newBinaryPath,
 		"service":     common.GetServiceName(req.Name),
 		"port":        newPort,
 		"status":      "running",
-		"message":     "插件更新成功",
+		"message":     "插件版本升级成功",
+	}, nil
+}
+
+// updateBinaryConfigOnly 仅更新二进制插件配置（不升级版本）
+func updateBinaryConfigOnly(oldRecord *PluginRecord, req UpdateRequest) (map[string]interface{}, error) {
+	common.Info("开始更新二进制插件配置",
+		zap.String("name", req.Name),
+		zap.Any("old_config", maskSensitiveConfigForLog(oldRecord.Config)),
+		zap.Any("new_config", maskSensitiveConfigForLog(req.Config)))
+
+	// 直接使用新配置替换旧配置（完全替换，不保留旧配置中的键）
+	newConfig := req.Config
+	if newConfig == nil {
+		newConfig = make(map[string]interface{})
+	}
+
+	common.Info("更新策略: 更新配置 -> 清空日志 -> 重启服务")
+
+	// 步骤1: 更新注册表记录
+	common.Info("步骤1: 更新注册表记录")
+	oldRecord.Config = newConfig
+	if err := AddPluginRecord(oldRecord); err != nil {
+		common.Error("更新插件记录失败", zap.Error(err))
+		return nil, fmt.Errorf("更新插件记录失败: %v", err)
+	}
+
+	// 步骤2: 清空日志文件
+	common.Info("步骤2: 清空日志文件")
+	pluginDir := filepath.Dir(oldRecord.BinaryPath)
+	logFile := filepath.Join(pluginDir, req.Name+".log")
+	if err := os.Truncate(logFile, 0); err != nil {
+		common.Warn("清空日志文件失败",
+			zap.String("log_file", logFile),
+			zap.Error(err))
+	} else {
+		common.Info("日志文件已清空", zap.String("log_file", logFile))
+	}
+
+	// 步骤3: 重启服务应用新配置（systemctl restart）
+	common.Info("步骤3: 重启服务应用配置", zap.String("method", "systemctl restart"))
+	result, err := operateBinary(oldRecord, "restart")
+	if err != nil {
+		common.Error("重启服务失败", zap.Error(err))
+		return nil, fmt.Errorf("重启服务失败: %v", err)
+	}
+
+	common.Info("二进制插件配置更新完成",
+		zap.String("name", req.Name),
+		zap.String("service", common.GetServiceName(req.Name)),
+		zap.String("restart_result", result))
+
+	return map[string]interface{}{
+		"name":     req.Name,
+		"version":  oldRecord.Version,
+		"category": "binary",
+		"service":  common.GetServiceName(req.Name),
+		"config":   maskSensitiveConfigForLog(newConfig),
+		"status":   "running",
+		"message":  "配置更新成功，服务已重启",
 	}, nil
 }

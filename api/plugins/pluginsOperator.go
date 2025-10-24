@@ -71,6 +71,13 @@ func PluginOperatorHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 操作成功后更新记录时间（记录最后操作时间）
+	if err := AddPluginRecord(record); err != nil {
+		common.Warn("更新插件操作时间失败",
+			zap.String("name", name),
+			zap.Error(err))
+	}
+
 	common.Info("插件操作成功",
 		zap.String("name", name),
 		zap.String("action", action))

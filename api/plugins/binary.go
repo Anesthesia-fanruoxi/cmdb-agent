@@ -109,6 +109,13 @@ func startBinaryService(name, binaryPath string, port int, command string, confi
 	absPluginDir, _ := filepath.Abs(pluginDir)
 	logFile := filepath.Join(absPluginDir, name+".log")
 
+	// 准备环境变量（kubectl等工具需要）
+	env := map[string]string{
+		"HOME":       "/root",                                                        // kubectl 需要 HOME 环境变量访问 ~/.kube/config
+		"KUBECONFIG": "/root/.kube/config",                                           // kubectl 配置文件路径
+		"PATH":       "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", // 标准PATH
+	}
+
 	// 构建systemd service配置
 	service := &common.SystemdService{
 		Name:        name,
@@ -120,10 +127,10 @@ func startBinaryService(name, binaryPath string, port int, command string, confi
 		LogPath:     logFile,
 		Restart:     "always",
 		RestartSec:  10,
-		MemoryLimit: "1G",   // TODO: 从参数配置
-		CPUQuota:    "200%", // TODO: 从参数配置
+		MemoryLimit: "2G",
+		CPUQuota:    "200%",
 		LimitNOFILE: 65536,
-		Environment: make(map[string]string), // 二进制插件不使用环境变量
+		Environment: env,
 		Wants:       []string{"cmdb-agent.service"},
 	}
 
