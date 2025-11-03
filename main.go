@@ -39,7 +39,12 @@ func main() {
 	}
 	defer common.Sync()
 
-	common.Info("CMDB Agent启动")
+	common.Info("CMDB Agent启动",
+		zap.String("version", common.GetVersion()),
+		zap.String("build_time", common.BuildTime))
+
+	// 初始化公网IP定时刷新任务
+	common.InitPublicIPRefresh()
 
 	// 设置路由
 	mux := router.SetupRouter()
@@ -48,8 +53,9 @@ func main() {
 	server := &http.Server{
 		Addr:         cfg.GetServerAddr(),
 		Handler:      mux,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		ReadTimeout:  600 * time.Second, // 10分钟读超时，支持大请求体
+		WriteTimeout: 600 * time.Second, // 10分钟写超时，支持慢查询和大响应
+		IdleTimeout:  120 * time.Second, // 2分钟空闲超时
 	}
 
 	// 启动服务器
@@ -62,7 +68,7 @@ func main() {
 
 	common.Info("服务器启动完成", zap.String("address", cfg.GetServerAddr()))
 
-	// 启动插件自动更新任务
+	// 启动插件自动更新任务（包含agent版本检查）
 	go plugins.StartAutoUpdateTask()
 
 	// 等待中断信号

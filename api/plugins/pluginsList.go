@@ -155,8 +155,10 @@ func PluginsListHandler(w http.ResponseWriter, r *http.Request) {
 		zap.Int("total", len(plugins)))
 
 	common.RespondSuccess(w, map[string]interface{}{
-		"total":   len(plugins),
-		"plugins": plugins,
+		"total":         len(plugins),
+		"plugins":       plugins,
+		"agent_version": common.GetVersion(),
+		"eip":           common.GetPublicIP(),
 	})
 }
 

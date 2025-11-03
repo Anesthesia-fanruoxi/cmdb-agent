@@ -17,10 +17,6 @@ import (
 type Parameters struct {
 	// 容器类型参数
 	ContainerPort int `json:"container_port"` // 容器内服务端口（可选，默认和port相同）
-
-	// 二进制类型参数
-	ConfigDir  string `json:"config_dir"`  // 配置目录名称，默认"config"
-	ConfigFile string `json:"config_file"` // 配置文件名称，默认"config.json"
 }
 
 // InstallRequest 插件安装请求参数
@@ -33,6 +29,7 @@ type InstallRequest struct {
 	Command     string                 `json:"command"`      // 执行命令
 	Port        int                    `json:"port"`         // 端口
 	Config      map[string]interface{} `json:"config"`       // 环境变量/配置参数
+	ConfigFile  string                 `json:"config_file"`  // 配置文件内容（二进制插件）
 	Parameters  Parameters             `json:"parameters"`   // 类型特定参数
 }
 
@@ -47,8 +44,22 @@ func InstallHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 获取真实客户端IP
+	realClientIP := getRealClientIP(r)
+	if realClientIP == "" {
+		// 如果没有代理头，从RemoteAddr获取IP（去掉端口）
+		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+			realClientIP = host
+		} else {
+			realClientIP = r.RemoteAddr
+		}
+	}
+
 	common.Info("收到插件安装请求",
-		zap.String("remote", r.RemoteAddr),
+		zap.String("client_ip", realClientIP),
+		zap.String("x_real_ip", r.Header.Get("X-Real-IP")),
+		zap.String("x_forwarded_for", r.Header.Get("X-Forwarded-For")),
+		zap.String("remote_addr", r.RemoteAddr),
 		zap.String("user_agent", r.UserAgent()))
 
 	// 读取请求体
@@ -60,7 +71,7 @@ func InstallHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
-	common.Debug("请求体内容", zap.String("body", string(body)))
+	common.Info("收到请求体", zap.String("body", string(body)))
 
 	// 解析JSON
 	var req InstallRequest
@@ -82,6 +93,7 @@ func InstallHandler(w http.ResponseWriter, r *http.Request) {
 		zap.String("command", req.Command),
 		zap.Int("port", req.Port),
 		zap.Any("config", req.Config),
+		zap.Int("config_file_length", len(req.ConfigFile)),
 		zap.Any("parameters", req.Parameters))
 
 	// 验证必填参数
@@ -168,17 +180,6 @@ func InstallHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	common.Info("端口检查通过", zap.Int("port", req.Port))
 
-	// 设置默认值
-	if req.Category == "binary" {
-		// 二进制类型默认值
-		if req.Parameters.ConfigDir == "" {
-			req.Parameters.ConfigDir = "config"
-		}
-		if req.Parameters.ConfigFile == "" {
-			req.Parameters.ConfigFile = "config.json"
-		}
-	}
-
 	common.Info("参数验证通过，准备安装插件",
 		zap.String("name", req.Name),
 		zap.String("category", req.Category))
@@ -228,7 +229,7 @@ func installBinaryPlugin(req InstallRequest) (map[string]interface{}, error) {
 		zap.String("path", binaryPath))
 
 	// 步骤2: 启动二进制服务（使用systemd）
-	if err := startBinaryService(req.Name, binaryPath, req.Port, req.Command, req.Config, req.Parameters); err != nil {
+	if err := startBinaryService(req.Name, binaryPath, req.Port, req.Command, req.Config, req.ConfigFile, req.Parameters); err != nil {
 		return nil, err
 	}
 
@@ -243,6 +244,7 @@ func installBinaryPlugin(req InstallRequest) (map[string]interface{}, error) {
 		Category:    "binary",
 		DownloadURL: req.DownloadURL,
 		BinaryPath:  binaryPath,
+		Command:     req.Command, // 保存启动命令
 		Port:        req.Port,
 		Config:      req.Config,
 		Parameters:  req.Parameters,

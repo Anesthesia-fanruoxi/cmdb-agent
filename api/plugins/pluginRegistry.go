@@ -25,6 +25,7 @@ type PluginRecord struct {
 	ContainerID   string                 `json:"container_id,omitempty"` // 容器：容器ID
 	DownloadURL   string                 `json:"download_url,omitempty"` // 二进制：下载地址
 	BinaryPath    string                 `json:"binary_path,omitempty"`  // 二进制：可执行文件路径
+	Command       string                 `json:"command,omitempty"`      // 二进制：启动命令
 	ProcessID     int                    `json:"process_id,omitempty"`   // 二进制：进程ID
 	Port          int                    `json:"port"`
 	ContainerPort int                    `json:"container_port,omitempty"` // 容器内端口

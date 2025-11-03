@@ -79,12 +79,35 @@ func downloadBinary(name, downloadURL string) (string, error) {
 }
 
 // startBinaryService 启动二进制服务（使用systemd管理）
-func startBinaryService(name, binaryPath string, port int, command string, config map[string]interface{}, params Parameters) error {
+func startBinaryService(name, binaryPath string, port int, command string, config map[string]interface{}, configFile string, params Parameters) error {
 	common.Info("步骤2: 开始启动二进制服务(systemd)",
 		zap.String("name", name),
 		zap.String("binary", binaryPath))
 
 	pluginDir := filepath.Dir(binaryPath)
+
+	// 如果有配置文件内容，则写入配置文件
+	if configFile != "" {
+		// 使用默认配置目录和文件名
+		configDir := "config"
+		configFileName := "config.yaml"
+
+		// 创建配置目录
+		configPath := filepath.Join(pluginDir, configDir)
+		if err := os.MkdirAll(configPath, 0755); err != nil {
+			return fmt.Errorf("创建配置目录失败: %v", err)
+		}
+
+		// 写入配置文件
+		configFilePath := filepath.Join(configPath, configFileName)
+		if err := os.WriteFile(configFilePath, []byte(configFile), 0644); err != nil {
+			return fmt.Errorf("写入配置文件失败: %v", err)
+		}
+
+		common.Info("配置文件创建成功",
+			zap.String("path", configFilePath),
+			zap.Int("size", len(configFile)))
+	}
 
 	// 构建启动命令（仅支持command参数）
 	var cmdArgs []string

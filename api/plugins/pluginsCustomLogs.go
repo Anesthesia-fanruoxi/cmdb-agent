@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -44,8 +45,18 @@ type taskLogConnection struct {
 // const ws = new WebSocket(`ws://agent地址/ws/cicd/logs?data=加密参数`);
 // ws.onmessage = function(event) { console.log(event.data); };
 func PluginCustomLogHandler(w http.ResponseWriter, r *http.Request) {
+	// 获取真实客户端IP
+	realClientIP := getRealClientIP(r)
+	if realClientIP == "" {
+		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+			realClientIP = host
+		} else {
+			realClientIP = r.RemoteAddr
+		}
+	}
+
 	common.Info("收到cicd日志WebSocket请求",
-		zap.String("remote_addr", r.RemoteAddr),
+		zap.String("client_ip", realClientIP),
 		zap.String("url", r.URL.String()))
 
 	// 获取加密的参数
@@ -122,7 +133,7 @@ func PluginCustomLogHandler(w http.ResponseWriter, r *http.Request) {
 	common.Info("WebSocket连接升级成功",
 		zap.String("task_id", taskID),
 		zap.String("step_type", stepType),
-		zap.String("remote_addr", r.RemoteAddr))
+		zap.String("client_ip", realClientIP))
 
 	// 构建日志文件路径
 	logFilePath := buildLogFilePath(taskID, stepType)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"go.uber.org/zap"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,19 +14,31 @@ import (
 
 // UpdateRequest 插件更新请求
 type UpdateRequest struct {
-	Name       string                 `json:"name"`       // 插件名称（必填）
-	Version    string                 `json:"version"`    // 新版本号（可选，不填则保持原版本）
-	Config     map[string]interface{} `json:"config"`     // 新配置（可选）
-	Parameters Parameters             `json:"parameters"` // 新参数（可选）
-	Port       int                    `json:"port"`       // 新端口（可选）
+	Name        string                 `json:"name"`         // 插件名称（必填）
+	Version     string                 `json:"version"`      // 新版本号（可选，不填则保持原版本）
+	Config      map[string]interface{} `json:"config"`       // 新配置（可选）
+	Parameters  Parameters             `json:"parameters"`   // 新参数（可选）
+	Port        int                    `json:"port"`         // 新端口（可选）
+	Command     string                 `json:"command"`      // 启动命令（可选）
+	DownloadURL string                 `json:"download_url"` // 下载地址（可选）
 }
 
 // PluginUpdateHandler 插件更新接口
 func PluginUpdateHandler(w http.ResponseWriter, r *http.Request) {
+	// 获取真实客户端IP
+	realClientIP := getRealClientIP(r)
+	if realClientIP == "" {
+		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+			realClientIP = host
+		} else {
+			realClientIP = r.RemoteAddr
+		}
+	}
+
 	common.Info("收到插件更新请求",
 		zap.String("method", r.Method),
 		zap.String("path", r.URL.Path),
-		zap.String("remote", r.RemoteAddr))
+		zap.String("client_ip", realClientIP))
 
 	// 只允许PUT请求
 	if r.Method != http.MethodPut {
@@ -345,12 +358,6 @@ func upgradeBinaryVersion(oldRecord *PluginRecord, req UpdateRequest) (map[strin
 
 	// 合并参数
 	newParams := oldRecord.Parameters
-	if req.Parameters.ConfigDir != "" {
-		newParams.ConfigDir = req.Parameters.ConfigDir
-	}
-	if req.Parameters.ConfigFile != "" {
-		newParams.ConfigFile = req.Parameters.ConfigFile
-	}
 
 	common.Info("升级策略: 停止 -> 备份 -> 下载 -> 启动")
 
@@ -374,7 +381,12 @@ func upgradeBinaryVersion(oldRecord *PluginRecord, req UpdateRequest) (map[strin
 
 	// 步骤3: 下载新版本
 	common.Info("步骤3: 下载新版本二进制文件")
-	newBinaryPath, err := downloadBinary(req.Name, oldRecord.DownloadURL)
+	// 使用新的下载URL（如果提供），否则使用旧的
+	downloadURL := req.DownloadURL
+	if downloadURL == "" {
+		downloadURL = oldRecord.DownloadURL
+	}
+	newBinaryPath, err := downloadBinary(req.Name, downloadURL)
 	if err != nil {
 		// 下载失败，恢复备份
 		if _, restoreErr := os.Stat(backupPath); restoreErr == nil {
@@ -390,7 +402,13 @@ func upgradeBinaryVersion(oldRecord *PluginRecord, req UpdateRequest) (map[strin
 
 	// 步骤4: 启动新服务（使用systemd）
 	common.Info("步骤4: 启动新服务(systemd)")
-	if err := startBinaryService(req.Name, newBinaryPath, newPort, "", newConfig, newParams); err != nil {
+	// 使用新的command（如果提供），否则使用旧的
+	command := req.Command
+	if command == "" {
+		command = oldRecord.Command
+	}
+	// 更新时不重新创建配置文件，传递空字符串
+	if err := startBinaryService(req.Name, newBinaryPath, newPort, command, newConfig, "", newParams); err != nil {
 		return nil, fmt.Errorf("启动新服务失败: %v", err)
 	}
 
@@ -400,7 +418,8 @@ func upgradeBinaryVersion(oldRecord *PluginRecord, req UpdateRequest) (map[strin
 		Name:        req.Name,
 		Version:     req.Version,
 		Category:    "binary",
-		DownloadURL: oldRecord.DownloadURL,
+		DownloadURL: downloadURL, // 使用最新的下载URL
+		Command:     command,     // 使用最新的启动命令
 		BinaryPath:  newBinaryPath,
 		Port:        newPort,
 		Config:      newConfig,

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -28,8 +29,18 @@ var upgrader = websocket.Upgrader{
 
 // PluginLogsHandler WebSocket日志查看接口
 func PluginLogsHandler(w http.ResponseWriter, r *http.Request) {
+	// 获取真实客户端IP
+	realClientIP := getRealClientIP(r)
+	if realClientIP == "" {
+		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+			realClientIP = host
+		} else {
+			realClientIP = r.RemoteAddr
+		}
+	}
+
 	common.Info("收到WebSocket日志查看请求",
-		zap.String("remote", r.RemoteAddr),
+		zap.String("client_ip", realClientIP),
 		zap.String("path", r.URL.Path))
 
 	// 获取插件名称

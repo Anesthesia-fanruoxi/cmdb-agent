@@ -20,16 +20,22 @@ import (
 func PluginProxyHandler(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 
-	// 提取远程IP（去掉端口）
-	remoteIP := r.RemoteAddr
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		remoteIP = host
+	// 获取真实客户端IP
+	realClientIP := getRealClientIP(r)
+	if realClientIP == "" {
+		// 如果没有代理头，从RemoteAddr获取IP（去掉端口）
+		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+			realClientIP = host
+		} else {
+			realClientIP = r.RemoteAddr
+		}
 	}
 
 	common.Info("收到代理请求",
 		zap.String("method", r.Method),
 		zap.String("path", r.URL.Path),
-		zap.String("remote", remoteIP))
+		zap.String("real_client_ip", realClientIP),
+		zap.String("remote_addr", r.RemoteAddr))
 
 	// 解析路径: /proxy/{plugin-name}/{real-path}
 	path := strings.TrimPrefix(r.URL.Path, "/proxy/")
@@ -117,7 +123,7 @@ func PluginProxyHandler(w http.ResponseWriter, r *http.Request) {
 					zap.Int("encrypted_size", len(requestBody)),
 					zap.Int("decrypted_size", len(plainRequestBody)))
 
-				// 修改callback_url，让插件回调到agent而不是直接回调CMDB
+				// 修改callback_url，让插件回调到agent进行加密（其他内容保持不变）
 				plainRequestBody, err = modifyCallbackURL(plainRequestBody, pluginName, r)
 				if err != nil {
 					common.Warn("修改callback_url失败，继续使用原始请求体", zap.Error(err))
@@ -141,10 +147,11 @@ func PluginProxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 复制请求头（排除hop-by-hop headers）
+	// 复制请求头（排除hop-by-hop headers和将要重新设置的headers）
 	for key, values := range r.Header {
-		// 跳过hop-by-hop headers
-		if isHopByHopHeader(key) {
+		keyLower := strings.ToLower(key)
+		// 跳过hop-by-hop headers和将要重新设置的headers
+		if isHopByHopHeader(key) || keyLower == "x-real-ip" || keyLower == "x-forwarded-for" || keyLower == "x-forwarded-host" {
 			continue
 		}
 		for _, value := range values {
@@ -152,20 +159,21 @@ func PluginProxyHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 设置X-Forwarded-For 和 X-Real-IP（只传IP，不带端口）
-	if clientIP, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		proxyReq.Header.Set("X-Forwarded-For", clientIP)
-		proxyReq.Header.Set("X-Real-IP", clientIP)
-	} else {
-		// 如果解析失败，直接使用原始值
-		proxyReq.Header.Set("X-Forwarded-For", r.RemoteAddr)
-		proxyReq.Header.Set("X-Real-IP", r.RemoteAddr)
-	}
+	// 设置X-Forwarded-For 和 X-Real-IP，传递真实客户端IP给插件
+	proxyReq.Header.Set("X-Real-IP", realClientIP)
+	proxyReq.Header.Set("X-Forwarded-For", realClientIP)
 	proxyReq.Header.Set("X-Forwarded-Host", r.Host)
 
-	// 发送请求
+	// 强制设置 UTF-8 字符集，避免中文乱码
+	proxyReq.Header.Set("Content-Type", "application/json; charset=utf-8")
+
+	common.Debug("转发真实客户端IP",
+		zap.String("real_client_ip", realClientIP),
+		zap.String("remote_addr", r.RemoteAddr))
+
+	// 发送请求 - 增加超时支持慢查询
 	client := &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout: 600 * time.Second, // 10分钟超时，与Server配置一致
 	}
 
 	resp, err := client.Do(proxyReq)
@@ -251,6 +259,24 @@ func PluginProxyHandler(w http.ResponseWriter, r *http.Request) {
 		zap.Duration("duration", duration))
 }
 
+// getRealClientIP 从请求头获取真实客户端IP
+func getRealClientIP(r *http.Request) string {
+	// 优先使用 X-Real-IP
+	if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
+		return strings.TrimSpace(realIP)
+	}
+
+	// 其次使用 X-Forwarded-For 的第一个IP
+	if forwardedFor := r.Header.Get("X-Forwarded-For"); forwardedFor != "" {
+		ips := strings.Split(forwardedFor, ",")
+		if len(ips) > 0 {
+			return strings.TrimSpace(ips[0])
+		}
+	}
+
+	return ""
+}
+
 // isHopByHopHeader 判断是否为hop-by-hop header
 // 这些header不应该在代理时转发
 func isHopByHopHeader(header string) bool {
@@ -308,15 +334,11 @@ func modifyCallbackURL(requestBody []byte, pluginName string, r *http.Request) (
 		return requestBody, nil
 	}
 
-	// 构建agent的callback URL
-	// 格式: http://agent_host:agent_port/api/plugins/callback/{plugin_name}?original_url=xxx
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-
-	agentCallbackURL := fmt.Sprintf("%s://%s/api/plugins/callback/%s?original_url=%s",
-		scheme, r.Host, pluginName, originalCallbackURL)
+	// 构建agent的callback URL (使用localhost，因为插件和agent在同一台机器)
+	// 插件回调agent固定用http，agent转发给CMDB时使用原始URL
+	cfg := config.GetConfig()
+	agentCallbackURL := fmt.Sprintf("http://localhost:%d/api/plugins/callback/%s?original_url=%s",
+		cfg.Server.Port, pluginName, originalCallbackURL)
 
 	// 替换callback_url
 	data["callback_url"] = agentCallbackURL
@@ -326,11 +348,17 @@ func modifyCallbackURL(requestBody []byte, pluginName string, r *http.Request) (
 		zap.String("original", originalCallbackURL),
 		zap.String("modified", agentCallbackURL))
 
-	// 重新序列化JSON
-	modifiedBody, err := json.Marshal(data)
-	if err != nil {
+	// 重新序列化JSON - 不转义 Unicode 和 HTML
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false) // 不转义 HTML 字符
+
+	if err := encoder.Encode(data); err != nil {
 		return requestBody, fmt.Errorf("序列化JSON失败: %v", err)
 	}
+
+	// Encoder.Encode 会自动添加换行符，需要去掉
+	modifiedBody := bytes.TrimSpace(buf.Bytes())
 
 	return modifiedBody, nil
 }
@@ -401,18 +429,35 @@ func PluginCallbackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 复制请求头
+	// 复制请求头（排除hop-by-hop headers和将要重新设置的headers）
 	callbackReq.Header.Set("Content-Type", "application/json")
 	for key, values := range r.Header {
-		if !isHopByHopHeader(key) && key != "Content-Length" {
-			for _, value := range values {
-				callbackReq.Header.Add(key, value)
-			}
+		keyLower := strings.ToLower(key)
+		// 跳过hop-by-hop headers、Content-Length和将要重新设置的headers
+		if isHopByHopHeader(key) || keyLower == "content-length" || keyLower == "x-real-ip" || keyLower == "x-forwarded-for" || keyLower == "x-forwarded-host" {
+			continue
+		}
+		for _, value := range values {
+			callbackReq.Header.Add(key, value)
 		}
 	}
 
+	// 获取真实客户端IP并传递给CMDB
+	realClientIP := getRealClientIP(r)
+	if realClientIP == "" {
+		// 如果插件回调时没有代理头，从RemoteAddr获取IP（去掉端口）
+		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+			realClientIP = host
+		} else {
+			realClientIP = r.RemoteAddr
+		}
+	}
+	callbackReq.Header.Set("X-Real-IP", realClientIP)
+	callbackReq.Header.Set("X-Forwarded-For", realClientIP)
+	callbackReq.Header.Set("X-Forwarded-Host", r.Host)
+
 	// 发送请求
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: 600 * time.Second} // 10分钟超时
 	resp, err := client.Do(callbackReq)
 	if err != nil {
 		common.Error("转发回调请求失败",

@@ -9,21 +9,16 @@ server:
 
 # CMDB平台配置
 cmdb:
-  url: "http://192.168.100.128:8080"
+  url: "https://cmdb.hzbxhd.com"
   register_path: "/api/agent/node/register"
   heartbeat_path: "/api/agent/node/heartbeat"
   plugins_path: "/api/agent/plugins"
   timeout: 3
   heartbeat_interval: 30  # 心跳间隔(秒)
-  enable_auto_update: true              # 是否启用自动更新
+  # 插件和Agent自动更新配置
+  enable_auto_update: true              # 是否启用自动更新（包含插件和Agent）
   auto_update_interval: 1               # 更新检查间隔（分钟）
-  plugin_versions_path: "/api/agent/plugins/versions"  # 版本查询接口路径
-
-
-# 代理配置
-agent:
-  project: "test"
-  url: "http://192.168.7.2:8081"
+  plugin_versions_path: "/api/agent/plugins/versions"  # 版本查询接口（返回插件和agent版本信息）
 
 # 日志配置
 log:
