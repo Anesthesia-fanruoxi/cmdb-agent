@@ -94,9 +94,16 @@ func PluginProxyHandler(w http.ResponseWriter, r *http.Request) {
 			if isPlainTextPath {
 				// 明文路径，直接使用原始请求体
 				plainRequestBody = requestBody
-				common.Info("明文请求，跳过解密",
-					zap.String("path", realPath),
-					zap.Int("body_size", len(requestBody)))
+
+				// 对于 multipart 请求，记录 Content-Type 信息用于调试
+				contentType := r.Header.Get("Content-Type")
+				if strings.Contains(strings.ToLower(contentType), "multipart") {
+					// multipart 请求完整转发
+				} else {
+					common.Info("明文请求，跳过解密",
+						zap.String("path", realPath),
+						zap.Int("body_size", len(requestBody)))
+				}
 			} else {
 				// 加密路径，需要解密
 				// 解析加密数据结构 {"data": "encrypted_base64"}
@@ -164,8 +171,12 @@ func PluginProxyHandler(w http.ResponseWriter, r *http.Request) {
 	proxyReq.Header.Set("X-Forwarded-For", realClientIP)
 	proxyReq.Header.Set("X-Forwarded-Host", r.Host)
 
-	// 强制设置 UTF-8 字符集，避免中文乱码
-	proxyReq.Header.Set("Content-Type", "application/json; charset=utf-8")
+	// 对于非 multipart/form-data 请求，设置 JSON 格式和 UTF-8 字符集
+	contentType := r.Header.Get("Content-Type")
+	if !strings.Contains(strings.ToLower(contentType), "multipart/form-data") {
+		proxyReq.Header.Set("Content-Type", "application/json; charset=utf-8")
+	}
+	// multipart/form-data 请求已经在前面复制头部时保留了原始 Content-Type
 
 	common.Debug("转发真实客户端IP",
 		zap.String("real_client_ip", realClientIP),
@@ -304,9 +315,10 @@ func isHopByHopHeader(header string) bool {
 func isPlainTextRequest(path string) bool {
 	// 定义不需要解密的路径列表
 	plainTextPaths := []string{
-		"/update", // cicd插件的更新接口
-		"/health", // 健康检查接口
-		"/ping",   // ping接口
+		"/update",     // cicd插件的更新接口
+		"/health",     // 健康检查接口
+		"/ping",       // ping接口
+		"/api/upload", // 文件上传接口
 	}
 
 	// 检查路径是否匹配

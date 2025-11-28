@@ -35,3 +35,6 @@ test
 *.tar.lzo
 *.tar.zstd
 *.html
+/logs/cmdb-agent.log
+/cmdb-agent.service
+/install.txt

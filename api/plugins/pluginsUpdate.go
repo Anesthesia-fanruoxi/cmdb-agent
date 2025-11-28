@@ -16,6 +16,7 @@ import (
 type UpdateRequest struct {
 	Name        string                 `json:"name"`         // 插件名称（必填）
 	Version     string                 `json:"version"`      // 新版本号（可选，不填则保持原版本）
+	Image       string                 `json:"image"`        // 完整镜像地址（可选，优先级高于Version）
 	Config      map[string]interface{} `json:"config"`       // 新配置（可选）
 	Parameters  Parameters             `json:"parameters"`   // 新参数（可选）
 	Port        int                    `json:"port"`         // 新端口（可选）
@@ -144,20 +145,32 @@ func upgradeContainerVersion(oldRecord *PluginRecord, req UpdateRequest) (map[st
 		newConfig = make(map[string]interface{})
 	}
 
-	// 构建新镜像地址（替换tag）
-	imageWithoutTag := oldRecord.Image
-	if lastColon := len(oldRecord.Image) - 1; lastColon > 0 {
+	// 确定新镜像
+	var newImage string
+	if req.Image != "" {
+		// 优先使用完整的镜像地址
+		newImage = req.Image
+		common.Info("使用完整镜像地址",
+			zap.String("old_image", oldRecord.Image),
+			zap.String("new_image", newImage))
+	} else if req.Version != "" && req.Version != oldRecord.Version {
+		// 如果没有提供完整镜像地址，则使用版本号拼接
+		imageWithoutTag := oldRecord.Image
+		// 找到最后一个冒号的位置
 		for i := len(oldRecord.Image) - 1; i >= 0; i-- {
 			if oldRecord.Image[i] == ':' {
 				imageWithoutTag = oldRecord.Image[:i]
 				break
 			}
 		}
+		newImage = fmt.Sprintf("%s:%s", imageWithoutTag, req.Version)
+		common.Info("镜像版本更新",
+			zap.String("old_image", oldRecord.Image),
+			zap.String("new_image", newImage))
+	} else {
+		// 保持原镜像不变
+		newImage = oldRecord.Image
 	}
-	newImage := fmt.Sprintf("%s:%s", imageWithoutTag, req.Version)
-	common.Info("镜像版本更新",
-		zap.String("old_image", oldRecord.Image),
-		zap.String("new_image", newImage))
 
 	// 确定新端口
 	newPort := req.Port

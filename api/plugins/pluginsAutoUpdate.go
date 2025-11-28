@@ -16,6 +16,7 @@ import (
 type PluginVersionInfo struct {
 	Name        string `json:"name"`
 	Version     string `json:"version"`
+	Image       string `json:"image"` // 完整镜像地址（容器类插件）
 	PluginType  string `json:"plugin_type"`
 	DisplayName string `json:"display_name"`
 }
@@ -281,6 +282,7 @@ func updatePlugin(localPlugin *PluginRecord, remotePlugin PluginVersionInfo) err
 	updateReq := UpdateRequest{
 		Name:    remotePlugin.Name,
 		Version: remotePlugin.Version,
+		Image:   remotePlugin.Image, // 传递完整镜像地址
 		Config:  localPlugin.Config, // 保持现有配置
 		Port:    localPlugin.Port,
 		Command: localPlugin.Command, // 保持原启动命令
