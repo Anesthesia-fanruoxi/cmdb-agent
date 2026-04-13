@@ -23,8 +23,11 @@ func SetupRouter() *http.ServeMux {
 	// 插件操作接口（启动/停止/重启）
 	mux.HandleFunc("/api/plugins/operate", plugins.PluginOperatorHandler)
 
-	// 插件更新接口（支持版本升级和配置更新）
+	// 插件配置更新接口（config_set upsert + config_delete 删除）
 	mux.HandleFunc("/api/plugins/update", plugins.PluginUpdateHandler)
+
+	// 插件版本升级接口（只升级版本，不触发配置变动）
+	mux.HandleFunc("/api/plugins/upgrade", plugins.PluginUpgradeHandler)
 
 	// 插件卸载接口
 	mux.HandleFunc("/api/plugins/uninstall", plugins.PluginUninstallHandler)

@@ -276,28 +276,21 @@ func fetchPluginVersions() (*PluginVersionsResponse, error) {
 	return &versionsResp, nil
 }
 
-// updatePlugin 更新单个插件
+// updatePlugin 更新单个插件（只升级版本，保留原配置）
 func updatePlugin(localPlugin *PluginRecord, remotePlugin PluginVersionInfo) error {
-	// 构建更新请求
-	updateReq := UpdateRequest{
+	upgradeReq := UpgradeRequest{
 		Name:    remotePlugin.Name,
 		Version: remotePlugin.Version,
-		Image:   remotePlugin.Image, // 传递完整镜像地址
-		Config:  localPlugin.Config, // 保持现有配置
-		Port:    localPlugin.Port,
-		Command: localPlugin.Command, // 保持原启动命令
-		Parameters: Parameters{
-			ContainerPort: localPlugin.Parameters.ContainerPort,
-		},
-		// 注意：DownloadURL由CMDB在安装时提供，更新时使用旧记录中的URL
+		Image:   remotePlugin.Image,
+		// DownloadURL 使用旧记录中的，CMDB 版本信息里不带 download_url
 	}
 
-	// 根据插件类型执行更新
-	if localPlugin.Category == "container" {
-		_, err := updateContainerPlugin(localPlugin, updateReq)
+	switch localPlugin.Category {
+	case "container":
+		_, err := upgradeContainer(localPlugin, upgradeReq)
 		return err
-	} else if localPlugin.Category == "binary" {
-		_, err := updateBinaryPlugin(localPlugin, updateReq)
+	case "binary":
+		_, err := upgradeBinary(localPlugin, upgradeReq)
 		return err
 	}
 
