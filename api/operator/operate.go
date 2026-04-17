@@ -1,12 +1,12 @@
-package plugins
+package operator
 
 import (
+	"cmdb-agent/api/proxy"
 	"cmdb-agent/common"
 	"context"
 	"fmt"
 	"go.uber.org/zap"
 	"net/http"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -25,41 +25,189 @@ type PluginInfo struct {
 	InstalledAt   time.Time              `json:"installed_at"`
 }
 
-// PluginDetailHandler 查询单一插件详情
-func PluginDetailHandler(w http.ResponseWriter, r *http.Request) {
-	common.Info("收到查询插件详情请求",
+// OperatorHandler 插件操作接口（启动/停止/重启）
+func OperatorHandler(w http.ResponseWriter, r *http.Request) {
+	common.Info("收到插件操作请求",
 		zap.String("method", r.Method),
 		zap.String("path", r.URL.Path))
 
-	// 只允许GET请求
-	if r.Method != http.MethodGet {
-		common.RespondMethodNotAllowed(w, "只允许GET请求")
+	if r.Method != http.MethodPut {
+		common.RespondMethodNotAllowed(w, "只允许PUT请求")
 		return
 	}
 
-	// 获取插件名称参数
 	name := r.URL.Query().Get("name")
+	action := r.URL.Query().Get("action")
+
 	if name == "" {
 		common.RespondError(w, http.StatusBadRequest, "缺少插件名称参数")
 		return
 	}
+	if action == "" || (action != "start" && action != "stop" && action != "restart") {
+		common.RespondError(w, http.StatusBadRequest, "无效的操作类型，支持: start, stop, restart")
+		return
+	}
 
-	// 查询插件记录
-	record, err := GetPluginRecord(name)
+	record, err := proxy.GetPluginRecord(name)
 	if err != nil {
 		common.Error("查询插件记录失败", zap.Error(err))
 		common.RespondError(w, http.StatusInternalServerError,
 			"查询插件记录失败: "+err.Error())
 		return
 	}
+	if record == nil {
+		common.RespondError(w, http.StatusNotFound, "插件不存在: "+name)
+		return
+	}
 
+	var result string
+	if record.Category == "container" {
+		result, err = OperateContainer(record, action)
+	} else if record.Category == "binary" {
+		result, err = OperateBinary(record, action)
+	} else {
+		common.RespondError(w, http.StatusBadRequest, "不支持的插件类型: "+record.Category)
+		return
+	}
+
+	if err != nil {
+		common.Error("插件操作失败",
+			zap.String("name", name),
+			zap.String("action", action),
+			zap.Error(err))
+		common.RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	if err := proxy.AddPluginRecord(record); err != nil {
+		common.Warn("更新插件操作时间失败",
+			zap.String("name", name),
+			zap.Error(err))
+	}
+
+	common.Info("插件操作成功",
+		zap.String("name", name),
+		zap.String("action", action))
+
+	common.RespondSuccess(w, map[string]interface{}{
+		"name":    name,
+		"action":  action,
+		"result":  result,
+		"message": fmt.Sprintf("插件 %s 操作成功", action),
+	})
+}
+
+// OperateContainer 操作容器类型插件（公开，供 update 调用）
+func OperateContainer(record *proxy.PluginRecord, action string) (string, error) {
+	containerName := fmt.Sprintf("cmdb-%s", record.Name)
+
+	common.Info("开始操作容器",
+		zap.String("container", containerName),
+		zap.String("action", action))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var cmd *exec.Cmd
+	switch action {
+	case "start":
+		cmd = exec.CommandContext(ctx, "docker", "start", containerName)
+	case "stop":
+		cmd = exec.CommandContext(ctx, "docker", "stop", containerName)
+	case "restart":
+		cmd = exec.CommandContext(ctx, "docker", "restart", containerName)
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("操作超时: %s", action)
+		}
+		return "", fmt.Errorf("执行 docker %s 失败: %v, 输出: %s", action, err, string(output))
+	}
+
+	result := strings.TrimSpace(string(output))
+	time.Sleep(500 * time.Millisecond)
+
+	common.Info("容器操作完成",
+		zap.String("container", containerName),
+		zap.String("action", action),
+		zap.String("result", result))
+
+	return result, nil
+}
+
+// OperateBinary 操作二进制类型插件（公开，供 update 调用）
+func OperateBinary(record *proxy.PluginRecord, action string) (string, error) {
+	serviceName := common.GetServiceName(record.Name)
+
+	common.Info("开始操作二进制插件(systemd)",
+		zap.String("name", record.Name),
+		zap.String("service", serviceName),
+		zap.String("action", action))
+
+	var err error
+	switch action {
+	case "start":
+		err = common.SystemctlStart(record.Name)
+	case "stop":
+		err = common.SystemctlStop(record.Name)
+	case "restart":
+		err = common.SystemctlRestart(record.Name)
+	default:
+		return "", fmt.Errorf("不支持的操作: %s", action)
+	}
+
+	if err != nil {
+		return "", err
+	}
+
+	time.Sleep(500 * time.Millisecond)
+
+	isActive := common.SystemctlIsActive(record.Name)
+	status := "stopped"
+	if isActive {
+		status = "running"
+	}
+
+	common.Info("二进制插件操作完成",
+		zap.String("name", record.Name),
+		zap.String("action", action),
+		zap.String("status", status))
+
+	return fmt.Sprintf("服务 %s 操作成功，当前状态: %s", serviceName, status), nil
+}
+
+// DetailHandler 查询单一插件详情
+func DetailHandler(w http.ResponseWriter, r *http.Request) {
+	common.Info("收到查询插件详情请求",
+		zap.String("method", r.Method),
+		zap.String("path", r.URL.Path))
+
+	if r.Method != http.MethodGet {
+		common.RespondMethodNotAllowed(w, "只允许GET请求")
+		return
+	}
+
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		common.RespondError(w, http.StatusBadRequest, "缺少插件名称参数")
+		return
+	}
+
+	record, err := proxy.GetPluginRecord(name)
+	if err != nil {
+		common.Error("查询插件记录失败", zap.Error(err))
+		common.RespondError(w, http.StatusInternalServerError,
+			"查询插件记录失败: "+err.Error())
+		return
+	}
 	if record == nil {
 		common.RespondError(w, http.StatusNotFound,
 			fmt.Sprintf("插件不存在: %s", name))
 		return
 	}
 
-	// 构建插件信息
 	info := &PluginInfo{
 		Name:          record.Name,
 		Version:       record.Version,
@@ -70,14 +218,12 @@ func PluginDetailHandler(w http.ResponseWriter, r *http.Request) {
 		InstalledAt:   record.InstalledAt,
 	}
 
-	// 根据类型查询状态
 	if record.Category == "container" {
 		info.Status, info.Uptime = getContainerStatus(record.ContainerID)
 	} else if record.Category == "binary" {
 		info.Status, info.Uptime = getBinaryStatusFromSystemd(record.Name)
 	}
 
-	// 返回结果
 	common.Info("查询插件详情成功",
 		zap.String("name", name),
 		zap.String("status", info.Status))
@@ -85,25 +231,22 @@ func PluginDetailHandler(w http.ResponseWriter, r *http.Request) {
 	common.RespondSuccess(w, info)
 }
 
-// PluginsListHandler 查询插件列表
-func PluginsListHandler(w http.ResponseWriter, r *http.Request) {
+// ListHandler 查询插件列表
+func ListHandler(w http.ResponseWriter, r *http.Request) {
 	common.Info("收到查询插件列表请求",
 		zap.String("method", r.Method),
 		zap.String("path", r.URL.Path))
 
-	// 只允许GET请求
 	if r.Method != http.MethodGet {
 		common.RespondMethodNotAllowed(w, "只允许GET请求")
 		return
 	}
 
-	// 查询参数
-	category := r.URL.Query().Get("category") // container, binary
-	status := r.URL.Query().Get("status")     // running, stopped
-	name := r.URL.Query().Get("name")         // 名称搜索
+	category := r.URL.Query().Get("category")
+	status := r.URL.Query().Get("status")
+	name := r.URL.Query().Get("name")
 
-	// 读取插件注册表
-	records, err := ListPluginRecords()
+	records, err := proxy.ListPluginRecords()
 	if err != nil {
 		common.Error("读取插件注册表失败", zap.Error(err))
 		common.RespondError(w, http.StatusInternalServerError,
@@ -111,20 +254,15 @@ func PluginsListHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 转换为带状态的插件信息
 	var plugins []*PluginInfo
 	for _, record := range records {
-		// 过滤：类型
 		if category != "" && record.Category != category {
 			continue
 		}
-
-		// 过滤：名称
 		if name != "" && !strings.Contains(record.Name, name) {
 			continue
 		}
 
-		// 查询实时状态
 		info := &PluginInfo{
 			Name:          record.Name,
 			Version:       record.Version,
@@ -135,14 +273,12 @@ func PluginsListHandler(w http.ResponseWriter, r *http.Request) {
 			InstalledAt:   record.InstalledAt,
 		}
 
-		// 根据类型查询状态
 		if record.Category == "container" {
 			info.Status, info.Uptime = getContainerStatus(record.ContainerID)
 		} else if record.Category == "binary" {
 			info.Status, info.Uptime = getBinaryStatusFromSystemd(record.Name)
 		}
 
-		// 过滤：状态
 		if status != "" && info.Status != status {
 			continue
 		}
@@ -150,9 +286,7 @@ func PluginsListHandler(w http.ResponseWriter, r *http.Request) {
 		plugins = append(plugins, info)
 	}
 
-	// 返回结果
-	common.Info("查询插件列表成功",
-		zap.Int("total", len(plugins)))
+	common.Info("查询插件列表成功", zap.Int("total", len(plugins)))
 
 	common.RespondSuccess(w, map[string]interface{}{
 		"total":         len(plugins),
@@ -168,19 +302,16 @@ func getContainerStatus(containerID string) (string, string) {
 		return "not_found", ""
 	}
 
-	// 创建超时上下文（3秒超时）
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	// 查询容器状态
 	cmd := exec.CommandContext(ctx, "docker", "inspect",
 		"--format", "{{.State.Status}}|{{.State.StartedAt}}", containerID)
 
 	output, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			common.Warn("查询容器状态超时",
-				zap.String("container_id", containerID))
+			common.Warn("查询容器状态超时", zap.String("container_id", containerID))
 			return "error", ""
 		}
 		common.Debug("查询容器状态失败",
@@ -197,17 +328,14 @@ func getContainerStatus(containerID string) (string, string) {
 	status := parts[0]
 	startedAt := parts[1]
 
-	// 计算运行时间
 	var uptime string
 	if status == "running" {
 		startTime, err := time.Parse(time.RFC3339Nano, startedAt)
 		if err == nil {
-			duration := time.Since(startTime)
-			uptime = formatDuration(duration)
+			uptime = proxy.FormatDuration(time.Since(startTime))
 		}
 	}
 
-	// Docker状态映射
 	switch status {
 	case "running":
 		return "running", uptime
@@ -225,8 +353,6 @@ func getBinaryStatusFromSystemd(pluginName string) (string, string) {
 	if !common.SystemctlIsActive(pluginName) {
 		return "stopped", ""
 	}
-
-	// 服务运行中，获取启动时间
 	uptime := getServiceUptime(pluginName)
 	return "running", uptime
 }
@@ -235,7 +361,6 @@ func getBinaryStatusFromSystemd(pluginName string) (string, string) {
 func getServiceUptime(pluginName string) string {
 	serviceName := common.GetServiceName(pluginName)
 
-	// 使用systemctl show获取服务属性
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
@@ -248,7 +373,6 @@ func getServiceUptime(pluginName string) string {
 		return ""
 	}
 
-	// 解析输出：ActiveEnterTimestamp=Thu 2025-10-24 14:00:55 CST
 	line := strings.TrimSpace(string(output))
 	if !strings.HasPrefix(line, "ActiveEnterTimestamp=") {
 		return ""
@@ -259,8 +383,6 @@ func getServiceUptime(pluginName string) string {
 		return ""
 	}
 
-	// 解析时间格式：Thu 2025-10-24 14:00:55 CST
-	// systemd使用的是RFC1123Z类似格式
 	layouts := []string{
 		"Mon 2006-01-02 15:04:05 MST",
 		time.RFC1123Z,
@@ -282,41 +404,5 @@ func getServiceUptime(pluginName string) string {
 		return ""
 	}
 
-	// 计算运行时间
-	duration := time.Since(startTime)
-	return formatDuration(duration)
-}
-
-// getBinaryStatus 查询二进制进程状态（已废弃，保留用于兼容）
-func getBinaryStatus(pid int) string {
-	if pid == 0 {
-		return "stopped"
-	}
-
-	// 查找进程
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return "not_found"
-	}
-
-	// 发送信号0检查进程是否存在
-	err = process.Signal(os.Signal(nil))
-	if err != nil {
-		return "stopped"
-	}
-
-	return "running"
-}
-
-// formatDuration 格式化时间间隔
-func formatDuration(d time.Duration) string {
-	if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	} else if d < time.Hour {
-		return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
-	} else if d < 24*time.Hour {
-		return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
-	} else {
-		return fmt.Sprintf("%dd%dh", int(d.Hours())/24, int(d.Hours())%24)
-	}
+	return proxy.FormatDuration(time.Since(startTime))
 }

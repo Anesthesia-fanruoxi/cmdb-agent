@@ -1,6 +1,8 @@
-package plugins
+package update
 
 import (
+	"cmdb-agent/api/operator"
+	"cmdb-agent/api/proxy"
 	"cmdb-agent/common"
 	"encoding/json"
 	"fmt"
@@ -19,9 +21,9 @@ type UpdateRequest struct {
 	ConfigDelete []string               `json:"config_delete"` // 要删除的配置 key 列表
 }
 
-// PluginUpdateHandler 插件配置更新接口
-func PluginUpdateHandler(w http.ResponseWriter, r *http.Request) {
-	realClientIP := getRealClientIP(r)
+// UpdateHandler 插件配置更新接口
+func UpdateHandler(w http.ResponseWriter, r *http.Request) {
+	realClientIP := proxy.GetRealClientIP(r.Header.Get("X-Real-IP"), r.Header.Get("X-Forwarded-For"))
 	if realClientIP == "" {
 		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 			realClientIP = host
@@ -44,7 +46,7 @@ func PluginUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		common.RespondError(w, http.StatusBadRequest, "读取请求体失败: "+err.Error())
 		return
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 
 	var req UpdateRequest
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -61,7 +63,7 @@ func PluginUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	record, err := GetPluginRecord(req.Name)
+	record, err := proxy.GetPluginRecord(req.Name)
 	if err != nil {
 		common.RespondError(w, http.StatusInternalServerError, "查询插件记录失败: "+err.Error())
 		return
@@ -71,12 +73,11 @@ func PluginUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 合并配置：在原配置基础上 upsert + delete
 	newConfig := mergeConfig(record.Config, req.ConfigSet, req.ConfigDelete)
 
 	common.Info("配置变更",
 		zap.String("name", req.Name),
-		zap.Any("set", maskSensitiveConfigForLog(req.ConfigSet)),
+		zap.Any("set", proxy.MaskSensitiveConfigForLog(req.ConfigSet)),
 		zap.Strings("delete", req.ConfigDelete))
 
 	var result map[string]interface{}
@@ -103,17 +104,12 @@ func PluginUpdateHandler(w http.ResponseWriter, r *http.Request) {
 func mergeConfig(base map[string]interface{}, set map[string]interface{}, delKeys []string) map[string]interface{} {
 	result := make(map[string]interface{})
 
-	// 复制原配置
 	for k, v := range base {
 		result[k] = v
 	}
-
-	// upsert
 	for k, v := range set {
 		result[k] = v
 	}
-
-	// delete
 	for _, k := range delKeys {
 		delete(result, k)
 	}
@@ -122,25 +118,27 @@ func mergeConfig(base map[string]interface{}, set map[string]interface{}, delKey
 }
 
 // updateContainerConfig 更新容器配置（停止 -> 删除 -> 重建）
-func updateContainerConfig(record *PluginRecord, newConfig map[string]interface{}) (map[string]interface{}, error) {
+func updateContainerConfig(record *proxy.PluginRecord, newConfig map[string]interface{}) (map[string]interface{}, error) {
 	oldContainerID := record.ContainerID
 
 	common.Info("更新容器配置: 停止 -> 删除 -> 重建", zap.String("name", record.Name))
 
-	if _, err := operateContainer(record, "stop"); err != nil {
+	if _, err := operator.OperateContainer(record, "stop"); err != nil {
 		common.Warn("停止旧容器失败，继续执行", zap.Error(err))
 	}
 
-	if err := uninstallContainer(record); err != nil {
+	if err := operator.UninstallContainer(record); err != nil {
 		common.Warn("删除旧容器失败，继续执行", zap.Error(err))
 	}
 
-	containerID, err := startContainerService(record.Name, record.Image, record.Port, "", newConfig, record.Parameters)
+	containerID, err := operator.StartContainerService(record.Name, record.Image, record.Port, "", newConfig, record.Parameters)
 	if err != nil {
 		// 回滚
-		if rollbackID, rollbackErr := startContainerService(record.Name, record.Image, record.Port, "", record.Config, record.Parameters); rollbackErr == nil {
+		if rollbackID, rollbackErr := operator.StartContainerService(record.Name, record.Image, record.Port, "", record.Config, record.Parameters); rollbackErr == nil {
 			record.ContainerID = rollbackID
-			AddPluginRecord(record)
+			if err := proxy.AddPluginRecord(record); err != nil {
+				common.Warn("回滚时更新插件记录失败", zap.Error(err))
+			}
 			common.Info("已回滚到旧配置")
 		}
 		return nil, fmt.Errorf("重建容器失败: %v", err)
@@ -148,7 +146,7 @@ func updateContainerConfig(record *PluginRecord, newConfig map[string]interface{
 
 	record.Config = newConfig
 	record.ContainerID = containerID
-	if err := AddPluginRecord(record); err != nil {
+	if err := proxy.AddPluginRecord(record); err != nil {
 		common.Warn("更新插件记录失败", zap.Error(err))
 	}
 
@@ -161,29 +159,28 @@ func updateContainerConfig(record *PluginRecord, newConfig map[string]interface{
 		"name":         record.Name,
 		"version":      record.Version,
 		"container_id": containerID,
-		"config":       maskSensitiveConfigForLog(newConfig),
+		"config":       proxy.MaskSensitiveConfigForLog(newConfig),
 		"status":       "running",
 		"message":      "配置更新成功，容器已重启",
 	}, nil
 }
 
 // updateBinaryConfig 更新二进制配置（更新记录 -> 清空日志 -> 重启服务）
-func updateBinaryConfig(record *PluginRecord, newConfig map[string]interface{}) (map[string]interface{}, error) {
+func updateBinaryConfig(record *proxy.PluginRecord, newConfig map[string]interface{}) (map[string]interface{}, error) {
 	common.Info("更新二进制配置: 更新记录 -> 清空日志 -> 重启", zap.String("name", record.Name))
 
 	record.Config = newConfig
-	if err := AddPluginRecord(record); err != nil {
+	if err := proxy.AddPluginRecord(record); err != nil {
 		return nil, fmt.Errorf("更新插件记录失败: %v", err)
 	}
 
-	// 清空日志
 	pluginDir := filepath.Dir(record.BinaryPath)
 	logFile := filepath.Join(pluginDir, record.Name+".log")
 	if err := os.Truncate(logFile, 0); err != nil {
 		common.Warn("清空日志文件失败", zap.String("log_file", logFile), zap.Error(err))
 	}
 
-	result, err := operateBinary(record, "restart")
+	result, err := operator.OperateBinary(record, "restart")
 	if err != nil {
 		return nil, fmt.Errorf("重启服务失败: %v", err)
 	}
@@ -197,7 +194,7 @@ func updateBinaryConfig(record *PluginRecord, newConfig map[string]interface{}) 
 		"name":    record.Name,
 		"version": record.Version,
 		"service": common.GetServiceName(record.Name),
-		"config":  maskSensitiveConfigForLog(newConfig),
+		"config":  proxy.MaskSensitiveConfigForLog(newConfig),
 		"status":  "running",
 		"message": "配置更新成功，服务已重启",
 	}, nil

@@ -1,7 +1,7 @@
 package main
 
 import (
-	"cmdb-agent/api/plugins"
+	"cmdb-agent/api/update"
 	"cmdb-agent/common"
 	"cmdb-agent/config"
 	"cmdb-agent/router"
@@ -69,7 +69,7 @@ func main() {
 	common.Info("服务器启动完成", zap.String("address", cfg.GetServerAddr()))
 
 	// 启动插件自动更新任务（包含agent版本检查）
-	go plugins.StartAutoUpdateTask()
+	go update.StartAutoUpdateTask()
 
 	// 等待中断信号
 	quit := make(chan os.Signal, 1)

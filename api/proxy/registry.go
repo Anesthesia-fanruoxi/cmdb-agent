@@ -1,4 +1,4 @@
-package plugins
+package proxy
 
 import (
 	"cmdb-agent/common"
@@ -15,6 +15,11 @@ var (
 	registryPath  = "plugins/.plugins.json"
 	initOnce      sync.Once
 )
+
+// Parameters 插件参数配置
+type Parameters struct {
+	ContainerPort int `json:"container_port"` // 容器内服务端口（可选，默认和port相同）
+}
 
 // PluginRecord 插件记录
 type PluginRecord struct {
@@ -47,16 +52,13 @@ func initRegistry() error {
 	var initErr error
 
 	initOnce.Do(func() {
-		// 创建plugins目录
 		pluginsDir := filepath.Dir(registryPath)
 		if err := os.MkdirAll(pluginsDir, 0755); err != nil {
 			initErr = err
 			return
 		}
 
-		// 检查文件是否存在
 		if _, err := os.Stat(registryPath); os.IsNotExist(err) {
-			// 创建空注册表（直接写文件，不调用saveRegistry避免死锁）
 			registry := &PluginRegistry{
 				Version:   "1.0",
 				UpdatedAt: time.Now(),
@@ -81,7 +83,6 @@ func initRegistry() error {
 
 // loadRegistry 加载插件注册表
 func loadRegistry() (*PluginRegistry, error) {
-	// 先确保文件存在（不持有锁）
 	if err := initRegistry(); err != nil {
 		return nil, err
 	}
@@ -96,9 +97,10 @@ func loadRegistry() (*PluginRegistry, error) {
 
 	var registry PluginRegistry
 	if err := json.Unmarshal(data, &registry); err != nil {
-		// 文件损坏，备份并创建新文件
 		backupPath := registryPath + ".backup"
-		os.Rename(registryPath, backupPath)
+		if renameErr := os.Rename(registryPath, backupPath); renameErr != nil {
+			common.Warn("备份损坏的注册表文件失败", zap.String("backup", backupPath), zap.Error(renameErr))
+		}
 		common.Warn("注册表文件损坏，已备份",
 			zap.String("backup", backupPath))
 
@@ -124,7 +126,6 @@ func saveRegistry(registry *PluginRegistry) error {
 		return err
 	}
 
-	// 确保目录存在
 	pluginsDir := filepath.Dir(registryPath)
 	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
 		return err
@@ -140,10 +141,8 @@ func AddPluginRecord(record *PluginRecord) error {
 		return err
 	}
 
-	// 检查是否已存在
 	for i, p := range registry.Plugins {
 		if p.Name == record.Name {
-			// 更新已存在的记录，每次更新都更新时间
 			record.InstalledAt = time.Now()
 			record.UpdatedAt = time.Now()
 			registry.Plugins[i] = record
@@ -152,7 +151,6 @@ func AddPluginRecord(record *PluginRecord) error {
 		}
 	}
 
-	// 添加新记录
 	record.InstalledAt = time.Now()
 	record.UpdatedAt = time.Now()
 	registry.Plugins = append(registry.Plugins, record)
@@ -171,7 +169,6 @@ func RemovePluginRecord(name string) error {
 		return err
 	}
 
-	// 查找并删除
 	for i, p := range registry.Plugins {
 		if p.Name == name {
 			registry.Plugins = append(registry.Plugins[:i], registry.Plugins[i+1:]...)

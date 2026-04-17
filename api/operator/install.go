@@ -1,6 +1,7 @@
-package plugins
+package operator
 
 import (
+	"cmdb-agent/api/proxy"
 	"cmdb-agent/common"
 	"encoding/json"
 	"fmt"
@@ -8,16 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strconv"
-	"strings"
-	"time"
 )
-
-// Parameters 插件参数配置
-type Parameters struct {
-	// 容器类型参数
-	ContainerPort int `json:"container_port"` // 容器内服务端口（可选，默认和port相同）
-}
 
 // InstallRequest 插件安装请求参数
 type InstallRequest struct {
@@ -30,12 +22,11 @@ type InstallRequest struct {
 	Port        int                    `json:"port"`         // 端口
 	Config      map[string]interface{} `json:"config"`       // 环境变量/配置参数
 	ConfigFile  string                 `json:"config_file"`  // 配置文件内容（二进制插件）
-	Parameters  Parameters             `json:"parameters"`   // 类型特定参数
+	Parameters  proxy.Parameters       `json:"parameters"`   // 类型特定参数
 }
 
 // InstallHandler 插件安装处理函数
 func InstallHandler(w http.ResponseWriter, r *http.Request) {
-	// 只允许POST请求
 	if r.Method != http.MethodPost {
 		common.Warn("请求方法不允许",
 			zap.String("method", r.Method),
@@ -44,10 +35,8 @@ func InstallHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 获取真实客户端IP
-	realClientIP := getRealClientIP(r)
+	realClientIP := proxy.GetRealClientIP(r.Header.Get("X-Real-IP"), r.Header.Get("X-Forwarded-For"))
 	if realClientIP == "" {
-		// 如果没有代理头，从RemoteAddr获取IP（去掉端口）
 		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 			realClientIP = host
 		} else {
@@ -57,23 +46,18 @@ func InstallHandler(w http.ResponseWriter, r *http.Request) {
 
 	common.Info("收到插件安装请求",
 		zap.String("client_ip", realClientIP),
-		zap.String("x_real_ip", r.Header.Get("X-Real-IP")),
-		zap.String("x_forwarded_for", r.Header.Get("X-Forwarded-For")),
-		zap.String("remote_addr", r.RemoteAddr),
-		zap.String("user_agent", r.UserAgent()))
+		zap.String("remote_addr", r.RemoteAddr))
 
-	// 读取请求体
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		common.Error("读取请求体失败", zap.Error(err))
 		common.RespondBadRequest(w, "读取请求体失败")
 		return
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 
 	common.Info("收到请求体", zap.String("body", string(body)))
 
-	// 解析JSON
 	var req InstallRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		common.Error("解析JSON失败",
@@ -83,7 +67,6 @@ func InstallHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 打印解析后的参数
 	common.Info("解析插件安装参数",
 		zap.String("name", req.Name),
 		zap.String("version", req.Version),
@@ -96,70 +79,53 @@ func InstallHandler(w http.ResponseWriter, r *http.Request) {
 		zap.Int("config_file_length", len(req.ConfigFile)),
 		zap.Any("parameters", req.Parameters))
 
-	// 验证必填参数
 	if req.Name == "" {
 		common.Warn("缺少必填参数: name")
 		common.RespondBadRequest(w, "缺少必填参数: name")
 		return
 	}
-
 	if req.Version == "" {
 		common.Warn("缺少必填参数: version")
 		common.RespondBadRequest(w, "缺少必填参数: version")
 		return
 	}
-
 	if req.Category == "" {
 		common.Warn("缺少必填参数: category")
 		common.RespondBadRequest(w, "缺少必填参数: category")
 		return
 	}
-
-	// 验证category类型
 	if req.Category != "container" && req.Category != "binary" {
-		common.Warn("不支持的插件类型",
-			zap.String("category", req.Category))
+		common.Warn("不支持的插件类型", zap.String("category", req.Category))
 		common.RespondBadRequest(w, "category必须是 container 或 binary")
 		return
 	}
-
-	// 验证容器类型必填参数
 	if req.Category == "container" && req.Image == "" {
 		common.Warn("容器类型缺少image参数")
 		common.RespondBadRequest(w, "容器类型必须提供image参数")
 		return
 	}
-
-	// 验证二进制类型必填参数
 	if req.Category == "binary" && req.DownloadURL == "" {
 		common.Warn("二进制类型缺少download_url参数")
 		common.RespondBadRequest(w, "二进制类型必须提供download_url参数")
 		return
 	}
 
-	// 验证或提取端口号（二进制插件优先从command提取）
 	var finalPort int
-
 	if req.Category == "binary" && req.Command != "" {
-		// 二进制插件：优先从command中提取端口
-		extractedPort := extractPortFromCommand(req.Command)
+		extractedPort := proxy.ExtractPortFromCommand(req.Command)
 		if extractedPort > 0 {
 			finalPort = extractedPort
 			common.Info("从command参数中提取端口号（优先）",
 				zap.String("command", req.Command),
 				zap.Int("port", finalPort))
 		} else if req.Port > 0 && req.Port <= 65535 {
-			// command中没有端口，使用port参数
 			finalPort = req.Port
-			common.Info("使用port参数",
-				zap.Int("port", finalPort))
+			common.Info("使用port参数", zap.Int("port", finalPort))
 		}
 	} else {
-		// 容器插件或二进制无command：直接使用port参数
 		finalPort = req.Port
 	}
 
-	// 验证最终端口号
 	if finalPort <= 0 || finalPort > 65535 {
 		common.Warn("端口号无效",
 			zap.Int("port", finalPort),
@@ -168,13 +134,10 @@ func InstallHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 更新请求中的端口号
 	req.Port = finalPort
 
-	// 检查端口是否被占用
-	if isPortInUse(req.Port) {
-		common.Warn("端口已被占用",
-			zap.Int("port", req.Port))
+	if proxy.IsPortInUse(req.Port) {
+		common.Warn("端口已被占用", zap.Int("port", req.Port))
 		common.RespondBadRequest(w, fmt.Sprintf("端口 %d 已被占用", req.Port))
 		return
 	}
@@ -184,7 +147,6 @@ func InstallHandler(w http.ResponseWriter, r *http.Request) {
 		zap.String("name", req.Name),
 		zap.String("category", req.Category))
 
-	// 根据类型执行安装
 	var (
 		result     map[string]interface{}
 		installErr error
@@ -209,7 +171,6 @@ func InstallHandler(w http.ResponseWriter, r *http.Request) {
 		zap.String("name", req.Name),
 		zap.String("category", req.Category))
 
-	// 返回成功响应
 	common.RespondSuccess(w, result)
 }
 
@@ -219,17 +180,14 @@ func installBinaryPlugin(req InstallRequest) (map[string]interface{}, error) {
 		zap.String("name", req.Name),
 		zap.String("download_url", req.DownloadURL))
 
-	// 步骤1: 下载二进制文件
-	binaryPath, err := downloadBinary(req.Name, req.DownloadURL)
+	binaryPath, err := DownloadBinary(req.Name, req.DownloadURL)
 	if err != nil {
 		return nil, err
 	}
 
-	common.Info("二进制文件下载成功",
-		zap.String("path", binaryPath))
+	common.Info("二进制文件下载成功", zap.String("path", binaryPath))
 
-	// 步骤2: 启动二进制服务（使用systemd）
-	if err := startBinaryService(req.Name, binaryPath, req.Port, req.Command, req.Config, req.ConfigFile, req.Parameters); err != nil {
+	if err := StartBinaryService(req.Name, binaryPath, req.Port, req.Command, req.Config, req.ConfigFile, req.Parameters); err != nil {
 		return nil, err
 	}
 
@@ -237,20 +195,19 @@ func installBinaryPlugin(req InstallRequest) (map[string]interface{}, error) {
 		zap.String("name", req.Name),
 		zap.String("service", common.GetServiceName(req.Name)))
 
-	// 保存插件记录到注册表
-	record := &PluginRecord{
+	record := &proxy.PluginRecord{
 		Name:        req.Name,
 		Version:     req.Version,
 		Category:    "binary",
 		DownloadURL: req.DownloadURL,
 		BinaryPath:  binaryPath,
-		Command:     req.Command, // 保存启动命令
+		Command:     req.Command,
 		Port:        req.Port,
 		Config:      req.Config,
 		Parameters:  req.Parameters,
 	}
 
-	if err := AddPluginRecord(record); err != nil {
+	if err := proxy.AddPluginRecord(record); err != nil {
 		common.Warn("保存插件记录失败", zap.Error(err))
 	}
 
@@ -271,16 +228,13 @@ func installContainerPlugin(req InstallRequest) (map[string]interface{}, error) 
 		zap.String("name", req.Name),
 		zap.String("image", req.Image))
 
-	// 步骤1: 拉取镜像
-	if err := pullDockerImage(req.Image); err != nil {
+	if err := PullDockerImage(req.Image); err != nil {
 		return nil, err
 	}
 
-	common.Info("镜像拉取成功",
-		zap.String("image", req.Image))
+	common.Info("镜像拉取成功", zap.String("image", req.Image))
 
-	// 步骤2: 启动容器服务
-	containerID, err := startContainerService(req.Name, req.Image, req.Port, req.Command, req.Config, req.Parameters)
+	containerID, err := StartContainerService(req.Name, req.Image, req.Port, req.Command, req.Config, req.Parameters)
 	if err != nil {
 		return nil, err
 	}
@@ -289,8 +243,7 @@ func installContainerPlugin(req InstallRequest) (map[string]interface{}, error) 
 		zap.String("name", req.Name),
 		zap.String("container_id", containerID))
 
-	// 保存插件记录到注册表
-	record := &PluginRecord{
+	record := &proxy.PluginRecord{
 		Name:          req.Name,
 		Version:       req.Version,
 		Category:      "container",
@@ -302,7 +255,7 @@ func installContainerPlugin(req InstallRequest) (map[string]interface{}, error) 
 		Parameters:    req.Parameters,
 	}
 
-	if err := AddPluginRecord(record); err != nil {
+	if err := proxy.AddPluginRecord(record); err != nil {
 		common.Warn("保存插件记录失败", zap.Error(err))
 	}
 
@@ -315,110 +268,4 @@ func installContainerPlugin(req InstallRequest) (map[string]interface{}, error) 
 		"port":         req.Port,
 		"status":       "running",
 	}, nil
-}
-
-// isPortInUse 检查端口是否被占用
-func isPortInUse(port int) bool {
-	address := fmt.Sprintf(":%d", port)
-	listener, err := net.Listen("tcp", address)
-	if err != nil {
-		// 端口被占用
-		return true
-	}
-	listener.Close()
-	return false
-}
-
-// checkPortWithTimeout 带超时的端口连接检查
-func checkPortWithTimeout(port int, timeout time.Duration) bool {
-	address := fmt.Sprintf("localhost:%d", port)
-	conn, err := net.DialTimeout("tcp", address, timeout)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
-}
-
-// maskSensitiveConfigForLog 对日志中的配置进行脱敏（与pluginsList中的函数相同）
-func maskSensitiveConfigForLog(config map[string]interface{}) map[string]interface{} {
-	if config == nil {
-		return nil
-	}
-
-	// 敏感字段关键词列表（不区分大小写）
-	sensitiveKeywords := []string{
-		"password", "passwd", "pwd",
-		"secret", "token", "key",
-		"credential", "auth",
-		"apikey", "api_key",
-		"access_key", "secret_key",
-	}
-
-	masked := make(map[string]interface{})
-	for key, value := range config {
-		keyLower := strings.ToLower(key)
-		isSensitive := false
-
-		// 检查是否包含敏感关键词
-		for _, keyword := range sensitiveKeywords {
-			if strings.Contains(keyLower, keyword) {
-				isSensitive = true
-				break
-			}
-		}
-
-		if isSensitive {
-			// 脱敏处理：统一使用6个星号
-			masked[key] = "******"
-		} else {
-			// 非敏感字段，检查是否为嵌套map
-			if mapValue, ok := value.(map[string]interface{}); ok {
-				masked[key] = maskSensitiveConfigForLog(mapValue)
-			} else {
-				masked[key] = value
-			}
-		}
-	}
-
-	return masked
-}
-
-// extractPortFromCommand 从command参数中提取端口号
-// 支持格式：-port 3037, --port 3037, -port=3037, --port=3037, -p 3037, -p=3037
-func extractPortFromCommand(command string) int {
-	// 去除首尾空格
-	command = strings.TrimSpace(command)
-	if command == "" {
-		return 0
-	}
-
-	// 分割命令行参数
-	parts := strings.Fields(command)
-
-	// 端口参数的可能形式
-	portFlags := []string{"-port", "--port", "-p"}
-
-	for i, part := range parts {
-		// 情况1: -port=3037 或 --port=3037
-		for _, flag := range portFlags {
-			if strings.HasPrefix(part, flag+"=") {
-				portStr := strings.TrimPrefix(part, flag+"=")
-				if port, err := strconv.Atoi(portStr); err == nil && port > 0 && port <= 65535 {
-					return port
-				}
-			}
-		}
-
-		// 情况2: -port 3037 或 --port 3037（下一个参数是端口号）
-		for _, flag := range portFlags {
-			if part == flag && i+1 < len(parts) {
-				if port, err := strconv.Atoi(parts[i+1]); err == nil && port > 0 && port <= 65535 {
-					return port
-				}
-			}
-		}
-	}
-
-	return 0
 }

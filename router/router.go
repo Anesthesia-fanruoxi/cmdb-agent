@@ -1,7 +1,9 @@
 package router
 
 import (
-	"cmdb-agent/api/plugins"
+	"cmdb-agent/api/operator"
+	"cmdb-agent/api/proxy"
+	"cmdb-agent/api/update"
 	"cmdb-agent/common"
 	"go.uber.org/zap"
 	"net/http"
@@ -12,42 +14,40 @@ func SetupRouter() *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// 插件安装接口
-	mux.HandleFunc("/api/plugins/install", plugins.InstallHandler)
+	mux.HandleFunc("/api/plugins/install", operator.InstallHandler)
 
 	// 插件列表接口
-	mux.HandleFunc("/api/plugins/list", plugins.PluginsListHandler)
+	mux.HandleFunc("/api/plugins/list", operator.ListHandler)
 
 	// 插件详情接口
-	mux.HandleFunc("/api/plugins/detail", plugins.PluginDetailHandler)
+	mux.HandleFunc("/api/plugins/detail", operator.DetailHandler)
 
 	// 插件操作接口（启动/停止/重启）
-	mux.HandleFunc("/api/plugins/operate", plugins.PluginOperatorHandler)
+	mux.HandleFunc("/api/plugins/operate", operator.OperatorHandler)
 
 	// 插件配置更新接口（config_set upsert + config_delete 删除）
-	mux.HandleFunc("/api/plugins/update", plugins.PluginUpdateHandler)
+	mux.HandleFunc("/api/plugins/update", update.UpdateHandler)
 
 	// 插件版本升级接口（只升级版本，不触发配置变动）
-	mux.HandleFunc("/api/plugins/upgrade", plugins.PluginUpgradeHandler)
+	mux.HandleFunc("/api/plugins/upgrade", update.UpgradeHandler)
 
 	// 插件卸载接口
-	mux.HandleFunc("/api/plugins/uninstall", plugins.PluginUninstallHandler)
+	mux.HandleFunc("/api/plugins/uninstall", operator.UninstallHandler)
 
 	// 插件日志查看接口（WebSocket）
-	mux.HandleFunc("/ws/plugins/logs", plugins.PluginLogsHandler)
+	mux.HandleFunc("/ws/plugins/logs", proxy.LogsHandler)
 
 	// 插件任务日志查看接口（WebSocket）- 用于读取cicd任务日志
-	mux.HandleFunc("/ws/cicd/logs", plugins.PluginCustomLogHandler)
+	mux.HandleFunc("/ws/cicd/logs", proxy.CustomLogHandler)
 
 	// 健康检查接口
 	mux.HandleFunc("/health", healthHandler)
 
 	// 插件代理接口（使用 /proxy/ 前缀，避免与 /api/ 混淆）
-	// 格式: /proxy/{plugin-name}/{real-path}
-	mux.HandleFunc("/proxy/", plugins.PluginProxyHandler)
+	mux.HandleFunc("/proxy/", proxy.ProxyHandler)
 
 	// 插件回调接口（插件执行完成后回调agent，agent加密后转发给CMDB）
-	// 格式: /api/plugins/callback/{plugin-name}?original_url=xxx
-	mux.HandleFunc("/api/plugins/callback/", plugins.PluginCallbackHandler)
+	mux.HandleFunc("/api/plugins/callback/", proxy.CallbackHandler)
 
 	common.Info("路由设置完成")
 	return mux

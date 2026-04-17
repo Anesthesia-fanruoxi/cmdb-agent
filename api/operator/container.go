@@ -1,6 +1,7 @@
-package plugins
+package operator
 
 import (
+	"cmdb-agent/api/proxy"
 	"cmdb-agent/common"
 	"fmt"
 	"go.uber.org/zap"
@@ -9,12 +10,11 @@ import (
 	"time"
 )
 
-// pullDockerImage 拉取Docker镜像
-func pullDockerImage(image string) error {
+// PullDockerImage 拉取Docker镜像
+func PullDockerImage(image string) error {
 	common.Info("步骤1: 开始拉取Docker镜像",
 		zap.String("image", image))
 
-	// 检查Docker是否可用
 	checkCmd := exec.Command("docker", "version")
 	if err := checkCmd.Run(); err != nil {
 		return fmt.Errorf("Docker不可用，请确保Docker已安装并运行: %v", err)
@@ -22,7 +22,6 @@ func pullDockerImage(image string) error {
 
 	common.Info("Docker环境检查通过")
 
-	// 拉取镜像
 	pullCmd := exec.Command("docker", "pull", image)
 	output, err := pullCmd.CombinedOutput()
 	if err != nil {
@@ -36,43 +35,41 @@ func pullDockerImage(image string) error {
 	return nil
 }
 
-// startContainerService 启动容器服务
-func startContainerService(name, image string, port int, command string, config map[string]interface{}, params Parameters) (string, error) {
+// StartContainerService 启动容器服务
+func StartContainerService(name, image string, port int, command string, config map[string]interface{}, params proxy.Parameters) (string, error) {
 	common.Info("步骤2: 开始启动容器服务",
 		zap.String("name", name),
 		zap.String("image", image))
 
-	// 生成容器名称 - 统一格式: cmdb-{name}
 	containerName := fmt.Sprintf("cmdb-%s", name)
 
-	// 检查是否已存在同名容器
 	checkCmd := exec.Command("docker", "ps", "-a", "--filter", fmt.Sprintf("name=%s", containerName), "--format", "{{.Names}}")
 	checkOutput, _ := checkCmd.Output()
 	if strings.TrimSpace(string(checkOutput)) == containerName {
 		common.Warn("发现同名容器，将先删除",
 			zap.String("container", containerName))
 
-		// 停止并删除旧容器
-		exec.Command("docker", "stop", containerName).Run()
-		exec.Command("docker", "rm", containerName).Run()
+		if err := exec.Command("docker", "stop", containerName).Run(); err != nil {
+			common.Warn("停止旧容器失败，继续执行", zap.String("container", containerName), zap.Error(err))
+		}
+		if err := exec.Command("docker", "rm", containerName).Run(); err != nil {
+			common.Warn("删除旧容器失败，继续执行", zap.String("container", containerName), zap.Error(err))
+		}
 
 		common.Info("旧容器已删除", zap.String("container", containerName))
 	}
 
-	// 构建docker run命令参数
 	dockerArgs := []string{
 		"run",
-		"-d", // 后台运行
+		"-d",
 		"--name", containerName,
-		"--restart", "unless-stopped", // 自动重启
+		"--restart", "unless-stopped",
 	}
 
-	// 添加端口映射
 	if port > 0 {
-		// 确定容器内端口
 		containerPort := params.ContainerPort
 		if containerPort == 0 {
-			containerPort = port // 默认容器端口和宿主机端口相同
+			containerPort = port
 		}
 
 		portMapping := fmt.Sprintf("%d:%d", port, containerPort)
@@ -83,7 +80,6 @@ func startContainerService(name, image string, port int, command string, config 
 			zap.String("mapping", portMapping))
 	}
 
-	// 添加环境变量（从config中）
 	for key, value := range config {
 		if strValue, ok := value.(string); ok {
 			envVar := fmt.Sprintf("%s=%s", key, strValue)
@@ -92,10 +88,8 @@ func startContainerService(name, image string, port int, command string, config 
 		}
 	}
 
-	// 添加镜像名称
 	dockerArgs = append(dockerArgs, image)
 
-	// 如果有自定义命令，添加到参数末尾
 	if command != "" {
 		cmdParts := strings.Fields(command)
 		dockerArgs = append(dockerArgs, cmdParts...)
@@ -106,7 +100,6 @@ func startContainerService(name, image string, port int, command string, config 
 		zap.String("container", containerName),
 		zap.Strings("args", dockerArgs))
 
-	// 启动容器
 	runCmd := exec.Command("docker", dockerArgs...)
 	output, err := runCmd.CombinedOutput()
 	if err != nil {
@@ -118,11 +111,9 @@ func startContainerService(name, image string, port int, command string, config 
 		zap.String("container_id", containerID[:12]),
 		zap.String("container_name", containerName))
 
-	// 等待容器完全启动
 	common.Info("等待容器就绪...")
 	time.Sleep(2 * time.Second)
 
-	// 检查容器状态
 	statusCmd := exec.Command("docker", "ps", "--filter", fmt.Sprintf("name=%s", containerName), "--format", "{{.Status}}")
 	statusOutput, err := statusCmd.Output()
 	if err != nil {
