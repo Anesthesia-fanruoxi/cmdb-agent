@@ -105,10 +105,3 @@ func CompressAndEncrypt(data []byte, salt string) (string, error) {
 	// 将结果转换为base64编码
 	return base64.StdEncoding.EncodeToString(result), nil
 }
-
-// pkcs7Pad 对数据进行PKCS#7填充
-func pkcs7Pad(data []byte, blockSize int) []byte {
-	padding := blockSize - (len(data) % blockSize)
-	padText := bytes.Repeat([]byte{byte(padding)}, padding)
-	return append(data, padText...)
-}

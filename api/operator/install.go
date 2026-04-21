@@ -56,8 +56,6 @@ func InstallHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = r.Body.Close() }()
 
-	common.Info("收到请求体", zap.String("body", string(body)))
-
 	var req InstallRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		common.Error("解析JSON失败",

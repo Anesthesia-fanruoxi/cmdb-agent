@@ -4,12 +4,10 @@
 server:
   port: 8081
   host: "0.0.0.0"
-  read_timeout: 30
-  write_timeout: 30
 
 # CMDB平台配置
 cmdb:
-  url: "https://cmdb.hzbxhd.com"
+  url: "https://api.hzbxhd.com"
   register_path: "/api/agent/node/register"
   heartbeat_path: "/api/agent/node/heartbeat"
   plugins_path: "/api/agent/plugins"

@@ -12,6 +12,14 @@ import (
 	"time"
 )
 
+// safeContainerID 安全截取容器ID前12位，避免空字符串panic
+func safeContainerID(id string) string {
+	if len(id) <= 12 {
+		return id
+	}
+	return id[:12]
+}
+
 // PluginInfo 插件信息（用于接口返回）
 type PluginInfo struct {
 	Name          string                 `json:"name"`

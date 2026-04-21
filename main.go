@@ -53,9 +53,9 @@ func main() {
 	server := &http.Server{
 		Addr:         cfg.GetServerAddr(),
 		Handler:      mux,
-		ReadTimeout:  600 * time.Second, // 10分钟读超时，支持大请求体
-		WriteTimeout: 600 * time.Second, // 10分钟写超时，支持慢查询和大响应
-		IdleTimeout:  120 * time.Second, // 2分钟空闲超时
+		ReadTimeout:  600 * time.Second,
+		WriteTimeout: 600 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	// 启动服务器

@@ -83,6 +83,7 @@ func initRegistry() error {
 
 // loadRegistry 加载插件注册表
 func loadRegistry() (*PluginRegistry, error) {
+	// initRegistry 在加锁前调用，避免锁内嵌套写操作导致竞态
 	if err := initRegistry(); err != nil {
 		return nil, err
 	}
@@ -90,6 +91,11 @@ func loadRegistry() (*PluginRegistry, error) {
 	registryMutex.RLock()
 	defer registryMutex.RUnlock()
 
+	return readRegistryLocked()
+}
+
+// readRegistryLocked 在持有锁的情况下读取注册表（不加锁，由调用方保证）
+func readRegistryLocked() (*PluginRegistry, error) {
 	data, err := os.ReadFile(registryPath)
 	if err != nil {
 		return nil, err
@@ -97,13 +103,9 @@ func loadRegistry() (*PluginRegistry, error) {
 
 	var registry PluginRegistry
 	if err := json.Unmarshal(data, &registry); err != nil {
-		backupPath := registryPath + ".backup"
-		if renameErr := os.Rename(registryPath, backupPath); renameErr != nil {
-			common.Warn("备份损坏的注册表文件失败", zap.String("backup", backupPath), zap.Error(renameErr))
-		}
-		common.Warn("注册表文件损坏，已备份",
-			zap.String("backup", backupPath))
-
+		// 文件损坏：升级为写锁备份（此处调用方持有读锁，需重新获取写锁）
+		// 直接返回空注册表，备份由 saveRegistry 下次写入时覆盖
+		common.Warn("注册表文件损坏，使用空注册表")
 		registry = PluginRegistry{
 			Version:   "1.0",
 			UpdatedAt: time.Now(),
@@ -143,7 +145,8 @@ func AddPluginRecord(record *PluginRecord) error {
 
 	for i, p := range registry.Plugins {
 		if p.Name == record.Name {
-			record.InstalledAt = time.Now()
+			// 保留原始安装时间，只更新 UpdatedAt
+			record.InstalledAt = p.InstalledAt
 			record.UpdatedAt = time.Now()
 			registry.Plugins[i] = record
 			common.Info("更新插件记录", zap.String("name", record.Name))
@@ -151,6 +154,7 @@ func AddPluginRecord(record *PluginRecord) error {
 		}
 	}
 
+	// 新增记录
 	record.InstalledAt = time.Now()
 	record.UpdatedAt = time.Now()
 	registry.Plugins = append(registry.Plugins, record)

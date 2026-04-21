@@ -24,26 +24,21 @@ func GetRealClientIP(realIP, forwardedFor string) string {
 	return ""
 }
 
-// IsHopByHopHeader 判断是否为hop-by-hop header，这些header不应该在代理时转发
-func IsHopByHopHeader(header string) bool {
-	hopByHopHeaders := []string{
-		"Connection",
-		"Keep-Alive",
-		"Proxy-Authenticate",
-		"Proxy-Authorization",
-		"Te",
-		"Trailers",
-		"Transfer-Encoding",
-		"Upgrade",
-	}
+// hopByHopHeaders 不应在代理时转发的 hop-by-hop 请求头
+var hopByHopHeaders = map[string]bool{
+	"connection":          true,
+	"keep-alive":          true,
+	"proxy-authenticate":  true,
+	"proxy-authorization": true,
+	"te":                  true,
+	"trailers":            true,
+	"transfer-encoding":   true,
+	"upgrade":             true,
+}
 
-	headerLower := strings.ToLower(header)
-	for _, h := range hopByHopHeaders {
-		if strings.ToLower(h) == headerLower {
-			return true
-		}
-	}
-	return false
+// IsHopByHopHeader 判断是否为hop-by-hop header
+func IsHopByHopHeader(header string) bool {
+	return hopByHopHeaders[strings.ToLower(header)]
 }
 
 // IsPlainTextRequest 判断请求路径是否为明文（不需要解密）

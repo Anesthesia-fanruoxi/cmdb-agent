@@ -108,7 +108,7 @@ func StartContainerService(name, image string, port int, command string, config 
 
 	containerID := strings.TrimSpace(string(output))
 	common.Info("容器启动成功",
-		zap.String("container_id", containerID[:12]),
+		zap.String("container_id", safeContainerID(containerID)),
 		zap.String("container_name", containerName))
 
 	common.Info("等待容器就绪...")

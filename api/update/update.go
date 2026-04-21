@@ -100,6 +100,14 @@ func UpdateHandler(w http.ResponseWriter, r *http.Request) {
 	common.RespondSuccess(w, result)
 }
 
+// safeContainerID 安全截取容器ID前12位，避免空字符串panic
+func safeContainerID(id string) string {
+	if len(id) <= 12 {
+		return id
+	}
+	return id[:12]
+}
+
 // mergeConfig 在原配置基础上执行 upsert 和 delete
 func mergeConfig(base map[string]interface{}, set map[string]interface{}, delKeys []string) map[string]interface{} {
 	result := make(map[string]interface{})
@@ -152,8 +160,8 @@ func updateContainerConfig(record *proxy.PluginRecord, newConfig map[string]inte
 
 	common.Info("容器配置更新完成",
 		zap.String("name", record.Name),
-		zap.String("old_container_id", oldContainerID[:12]),
-		zap.String("new_container_id", containerID[:12]))
+		zap.String("old_container_id", safeContainerID(oldContainerID)),
+		zap.String("new_container_id", safeContainerID(containerID)))
 
 	return map[string]interface{}{
 		"name":         record.Name,

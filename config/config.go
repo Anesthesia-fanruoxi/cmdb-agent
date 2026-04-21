@@ -19,10 +19,8 @@ type Config struct {
 
 // ServerConfig API服务器配置
 type ServerConfig struct {
-	Port         int    `mapstructure:"port"`
-	Host         string `mapstructure:"host"`
-	ReadTimeout  int    `mapstructure:"read_timeout"`
-	WriteTimeout int    `mapstructure:"write_timeout"`
+	Port int    `mapstructure:"port"`
+	Host string `mapstructure:"host"`
 }
 
 // CMDBConfig CMDB平台配置
@@ -106,8 +104,6 @@ func setDefaults() {
 	// 服务器默认配置
 	viper.SetDefault("server.port", 8080)
 	viper.SetDefault("server.host", "0.0.0.0")
-	viper.SetDefault("server.read_timeout", 30)
-	viper.SetDefault("server.write_timeout", 30)
 
 	// CMDB平台默认配置
 	viper.SetDefault("cmdb.url", "http://localhost:8080")
